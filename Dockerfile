@@ -59,21 +59,23 @@ ARG WPILIB_BASE=https://frcmaven.wpi.edu/artifactory/release/edu/wpi/first
 
 RUN for lib in ntcore/ntcore-cpp wpiutil/wpiutil-cpp wpinet/wpinet-cpp; do \
         name=$(basename "$lib"); \
-        url="${WPILIB_BASE}/${lib}/${WPILIB_VER}/${name}-${WPILIB_VER}-linuxarm64.zip"; \
-        echo "[wpilib] Downloading $url"; \
-        wget -q -O "/tmp/${name}.zip" "$url"; \
-        unzip -q "/tmp/${name}.zip" -d "/tmp/${name}"; \
         \
-        # Copy shared libraries
-        find "/tmp/${name}/linux/arm64/shared" -maxdepth 1 -name "*.so*" \
+        # Shared libraries (platform-specific)
+        so_url="${WPILIB_BASE}/${lib}/${WPILIB_VER}/${name}-${WPILIB_VER}-linuxarm64.zip"; \
+        echo "[wpilib] Downloading $so_url"; \
+        wget -q -O "/tmp/${name}-so.zip" "$so_url"; \
+        unzip -q "/tmp/${name}-so.zip" -d "/tmp/${name}-so"; \
+        find "/tmp/${name}-so" -maxdepth 4 -name "*.so*" \
             -exec cp -P {} /usr/local/lib/ \; ; \
+        rm -rf "/tmp/${name}-so" "/tmp/${name}-so.zip"; \
         \
-        # Copy headers
-        if [ -d "/tmp/${name}/linux/arm64/shared/headers" ]; then \
-            cp -r "/tmp/${name}/linux/arm64/shared/headers/." /usr/local/include/; \
-        fi; \
-        \
-        rm -rf "/tmp/${name}" "/tmp/${name}.zip"; \
+        # Headers (platform-independent, separate artifact)
+        hdr_url="${WPILIB_BASE}/${lib}/${WPILIB_VER}/${name}-${WPILIB_VER}-headers.zip"; \
+        echo "[wpilib] Downloading $hdr_url"; \
+        wget -q -O "/tmp/${name}-hdr.zip" "$hdr_url"; \
+        unzip -q "/tmp/${name}-hdr.zip" -d "/tmp/${name}-hdr"; \
+        cp -r "/tmp/${name}-hdr/." /usr/local/include/; \
+        rm -rf "/tmp/${name}-hdr" "/tmp/${name}-hdr.zip"; \
     done \
     && ldconfig
 

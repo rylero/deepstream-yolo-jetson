@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <gst/gst.h>
 #include <glib.h>
 
@@ -37,6 +38,17 @@ static GMainLoop  *g_loop     = NULL;
 static NT_Inst     g_nt_inst  = 0;
 static NT_Publisher g_nt_pub  = 0;
 static guint32     g_frame_no = 0;
+static float       g_fps      = 0.0f;
+static int64_t     g_last_ts  = 0;   /* microseconds, for FPS calculation */
+
+#define FPS_ALPHA 0.1f   /* EMA smoothing factor */
+
+static int64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
+}
 
 #define INFER_CONFIG "/opt/deepstream/config/config_infer_primary_yolo11n.txt"
 #define VIDEO_DEVICE "/dev/video0"
@@ -86,6 +98,15 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
     if (!batch_meta)
         return GST_PAD_PROBE_OK;
 
+    /* Compute timestamp and FPS once per batch */
+    int64_t now = now_us();
+    if (g_last_ts > 0) {
+        float instant_fps = 1000000.0f / (float)(now - g_last_ts);
+        g_fps = (g_fps == 0.0f) ? instant_fps
+                                 : FPS_ALPHA * instant_fps + (1.0f - FPS_ALPHA) * g_fps;
+    }
+    g_last_ts = now;
+
     NvDsFrameMetaList *frame_list = batch_meta->frame_meta_list;
     while (frame_list) {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)frame_list->data;
@@ -98,6 +119,8 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         memset(&det_frame, 0, sizeof(det_frame));
         det_frame.frame_number   = g_frame_no++;
         det_frame.num_detections = 0;
+        det_frame.timestamp_us   = now;
+        det_frame.fps            = g_fps;
 
         float frame_w = (float)frame_meta->source_frame_width;
         float frame_h = (float)frame_meta->source_frame_height;
@@ -131,8 +154,8 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         NT_SetRaw(g_nt_pub, 0, (const uint8_t *)&det_frame, sizeof(det_frame));
 
         if (det_frame.num_detections > 0) {
-            printf("[DS] Frame %u: %u detection(s)\n",
-                   det_frame.frame_number, det_frame.num_detections);
+            printf("[DS] Frame %u: %u detection(s)  %.1f fps\n",
+                   det_frame.frame_number, det_frame.num_detections, g_fps);
         }
 
         frame_list = frame_list->next;
