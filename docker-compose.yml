@@ -1,0 +1,23 @@
+services:
+  deepstream-vision:
+    image: deepstream-yolo-jetson:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WPILIB_VER: "2025.3.2"    # Update for newer FRC season if needed
+    runtime: nvidia
+    environment:
+      - NT_TEAM_NUMBER=${NT_TEAM_NUMBER:-0}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+    devices:
+      - /dev/video0:/dev/video0   # USB camera
+    volumes:
+      - model_cache:/opt/deepstream/models   # Caches ONNX + TRT engine across restarts
+    restart: unless-stopped
+    # host networking is required so NT4 can reach the roboRIO on the FRC field subnet
+    network_mode: host
+
+volumes:
+  model_cache:

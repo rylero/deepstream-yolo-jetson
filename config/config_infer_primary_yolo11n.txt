@@ -1,0 +1,38 @@
+[property]
+gpu-id=0
+
+; Normalize pixel values from [0,255] to [0,1]
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+
+; Model paths (populated by export_model.sh at first launch)
+onnx-file=/opt/deepstream/models/yolo11n.pt.onnx
+model-engine-file=/opt/deepstream/models/yolo11n_b1_gpu0_fp16.engine
+labelfile-path=/opt/deepstream/config/labels.txt
+
+batch-size=1
+
+; network-mode: 0=FP32, 1=INT8, 2=FP16
+network-mode=2
+
+num-detected-classes=80
+interval=0
+gie-unique-id=1
+process-mode=1
+
+; network-type: 0=detector
+network-type=0
+
+; cluster-mode: 2=NMS (required for YOLO)
+cluster-mode=2
+
+maintain-aspect-ratio=1
+symmetric-padding=1
+
+; Custom YOLO parser from DeepStream-Yolo
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=/opt/deepstream/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+
+[class-attrs-all]
+nms-iou-threshold=0.45
+pre-cluster-threshold=0.25
