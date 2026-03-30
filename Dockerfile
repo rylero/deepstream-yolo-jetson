@@ -51,35 +51,6 @@ RUN git clone --depth 1 \
           /opt/ultralytics/ 2>/dev/null || true
 
 # ------------------------------------------------------------------ #
-# WPILib ntcore + wpiutil + wpinet (linuxarm64)                         #
-# Update WPILIB_VER to match your FRC season if needed.                #
-# ------------------------------------------------------------------ #
-ARG WPILIB_VER=2025.3.2
-ARG WPILIB_BASE=https://frcmaven.wpi.edu/artifactory/release/edu/wpi/first
-
-RUN for lib in ntcore/ntcore-cpp wpiutil/wpiutil-cpp wpinet/wpinet-cpp; do \
-        name=$(basename "$lib"); \
-        \
-        # Shared libraries (platform-specific)
-        so_url="${WPILIB_BASE}/${lib}/${WPILIB_VER}/${name}-${WPILIB_VER}-linuxarm64.zip"; \
-        echo "[wpilib] Downloading $so_url"; \
-        wget -q -O "/tmp/${name}-so.zip" "$so_url"; \
-        unzip -q "/tmp/${name}-so.zip" -d "/tmp/${name}-so"; \
-        find "/tmp/${name}-so" -maxdepth 4 -name "*.so*" \
-            -exec cp -P {} /usr/local/lib/ \; ; \
-        rm -rf "/tmp/${name}-so" "/tmp/${name}-so.zip"; \
-        \
-        # Headers (platform-independent, separate artifact)
-        hdr_url="${WPILIB_BASE}/${lib}/${WPILIB_VER}/${name}-${WPILIB_VER}-headers.zip"; \
-        echo "[wpilib] Downloading $hdr_url"; \
-        wget -q -O "/tmp/${name}-hdr.zip" "$hdr_url"; \
-        unzip -q "/tmp/${name}-hdr.zip" -d "/tmp/${name}-hdr"; \
-        cp -r "/tmp/${name}-hdr/." /usr/local/include/; \
-        rm -rf "/tmp/${name}-hdr" "/tmp/${name}-hdr.zip"; \
-    done \
-    && ldconfig
-
-# ------------------------------------------------------------------ #
 # Project directories                                                  #
 # ------------------------------------------------------------------ #
 RUN mkdir -p \

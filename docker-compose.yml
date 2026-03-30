@@ -4,8 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        WPILIB_VER: "2025.3.2"    # Update for newer FRC season if needed
+      args: {}
     runtime: nvidia
     environment:
       - NT_TEAM_NUMBER=${NT_TEAM_NUMBER:-0}
