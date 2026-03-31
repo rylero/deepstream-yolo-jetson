@@ -65,20 +65,30 @@ static void nt_init(void)
     const char *team_str = getenv("NT_TEAM_NUMBER");
     unsigned int team    = team_str ? (unsigned int)atoi(team_str) : 0;
 
+    /* Use local variables for WPI_String — avoids compound-literal lifetime issues */
+    struct WPI_String identity   = { "jetson-vision",       13 };
+    struct WPI_String topic_name = { "/vision/detections",  18 };
+    struct WPI_String type_str   = { "raw",                  3 };
+    struct WPI_String fallback   = { "roborio-0-frc.local", 19 };
+
     g_nt_inst = NT_GetDefaultInstance();
-    NT_StartClient4(g_nt_inst, &WPI_STR("jetson-vision"));
+    NT_StartClient4(g_nt_inst, &identity);
 
     if (team > 0) {
         printf("[NT] Connecting to team %u roboRIO\n", team);
         NT_SetServerTeam(g_nt_inst, team, 0);  /* 0 = default port 1735 */
     } else {
-        /* Fallback: connect to roborio-0-frc.local if no team set */
         fprintf(stderr, "[NT] Warning: NT_TEAM_NUMBER not set. Trying roborio-0-frc.local\n");
-        NT_SetServer(g_nt_inst, &WPI_STR("roborio-0-frc.local"), 1735);
+        NT_SetServer(g_nt_inst, &fallback, 1735);
     }
 
-    NT_Topic topic = NT_GetTopic(g_nt_inst, &WPI_STR("/vision/detections"));
-    g_nt_pub = NT_Publish(topic, NT_RAW, &WPI_STR("raw"), NULL);
+    NT_Topic topic = NT_GetTopic(g_nt_inst, &topic_name);
+
+    /* NT_Publish requires a valid (non-NULL) options pointer in WPILib 2025 */
+    struct NT_PubSubOptions opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.structSize = sizeof(opts);
+    g_nt_pub = NT_Publish(topic, NT_RAW, &type_str, &opts);
 
     printf("[NT] Publisher created for /vision/detections\n");
 }
