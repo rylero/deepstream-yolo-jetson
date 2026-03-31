@@ -61,7 +61,6 @@ target_link_libraries(ds_nt_probe PRIVATE
     ${GLIB_LIBRARIES}
     nvdsgst_meta
     nvds_meta
-    nvbufsurface
     ${ntcore_SO}
     ${wpiutil_SO}
     ${wpinet_SO}
