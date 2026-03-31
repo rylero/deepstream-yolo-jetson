@@ -46,9 +46,15 @@ RUN git clone --depth 1 \
 # ------------------------------------------------------------------ #
 RUN git clone --depth 1 \
         https://github.com/ultralytics/ultralytics \
-        /opt/ultralytics \
-    && cp /opt/deepstream/DeepStream-Yolo/utils/export_yolo*.py \
-          /opt/ultralytics/ 2>/dev/null || true
+        /opt/ultralytics
+
+# Copy DeepStream-Yolo export scripts; list what's available so failures are visible
+RUN echo "[build] DeepStream-Yolo utils contents:" \
+    && ls /opt/deepstream/DeepStream-Yolo/utils/ \
+    && find /opt/deepstream/DeepStream-Yolo/utils/ -name "export_yolo*.py" \
+         -exec cp {} /opt/ultralytics/ \; \
+    && echo "[build] Copied export scripts:" \
+    && ls /opt/ultralytics/export_yolo*.py 2>/dev/null || echo "[build] WARNING: no export_yolo*.py found"
 
 # ------------------------------------------------------------------ #
 # Project directories                                                  #

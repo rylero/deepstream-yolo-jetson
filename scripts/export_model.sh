@@ -29,19 +29,26 @@ if [ ! -f "$ONNX" ]; then
     echo "[export] Exporting ONNX..."
     cd "$ULTRALYTICS_DIR"
 
-    # The export script may be named export_yolo.py or export_yoloV26.py
-    # depending on which commit of DeepStream-Yolo was cloned.
+    # Search for the export script — name varies by DeepStream-Yolo version.
+    # Also check DeepStream-Yolo/utils directly in case the Dockerfile copy failed.
     EXPORT_SCRIPT=""
-    for candidate in export_yolo.py export_yoloV26.py; do
-        if [ -f "$ULTRALYTICS_DIR/$candidate" ]; then
-            EXPORT_SCRIPT="$candidate"
-            break
-        fi
+    SEARCH_DIRS="$ULTRALYTICS_DIR $DEEPSTREAM_YOLO/utils"
+    for dir in $SEARCH_DIRS; do
+        for candidate in export_yolo11.py export_yolo.py export_yoloV8.py export_yoloV26.py; do
+            if [ -f "$dir/$candidate" ]; then
+                # Copy to ultralytics dir if found elsewhere
+                [ "$dir" != "$ULTRALYTICS_DIR" ] && cp "$dir/$candidate" "$ULTRALYTICS_DIR/"
+                EXPORT_SCRIPT="$candidate"
+                break 2
+            fi
+        done
     done
 
     if [ -z "$EXPORT_SCRIPT" ]; then
-        echo "[export] ERROR: No export script found in $ULTRALYTICS_DIR" >&2
-        echo "[export] Expected export_yolo.py or export_yoloV26.py" >&2
+        echo "[export] ERROR: No export script found." >&2
+        echo "[export] Searched: $SEARCH_DIRS" >&2
+        echo "[export] Available in DeepStream-Yolo/utils:" >&2
+        ls "$DEEPSTREAM_YOLO/utils/" >&2
         exit 1
     fi
 
