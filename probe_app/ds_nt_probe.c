@@ -26,7 +26,7 @@
 #include "nvdsmeta.h"
 
 /* WPILib NetworkTables C API */
-#include <networktables/ntcore.h>
+#include <ntcore.h>
 
 #include "detection_types.h"
 
