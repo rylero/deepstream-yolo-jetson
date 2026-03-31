@@ -27,6 +27,12 @@ FetchContent_MakeAvailable(
     wpinet_headers  wpinet_libs
     ntcore_headers  ntcore_libs)
 
+# Debug: print resolved paths so they're visible in docker build output
+message(STATUS "wpiutil_headers_SOURCE_DIR = ${wpiutil_headers_SOURCE_DIR}")
+message(STATUS "wpinet_headers_SOURCE_DIR  = ${wpinet_headers_SOURCE_DIR}")
+message(STATUS "ntcore_headers_SOURCE_DIR  = ${ntcore_headers_SOURCE_DIR}")
+message(STATUS "ntcore_libs_SOURCE_DIR     = ${ntcore_libs_SOURCE_DIR}")
+
 # Locate each .so from its extracted zip directory
 foreach(lib wpiutil wpinet ntcore)
     find_library(${lib}_SO NAMES ${lib}
@@ -34,6 +40,7 @@ foreach(lib wpiutil wpinet ntcore)
             "${${lib}_libs_SOURCE_DIR}/linux/arm64/shared"
             "${${lib}_libs_SOURCE_DIR}/linuxarm64"
         NO_DEFAULT_PATH REQUIRED)
+    message(STATUS "${lib}_SO = ${${lib}_SO}")
 endforeach()
 
 # ------------------------------------------------------------------ #
