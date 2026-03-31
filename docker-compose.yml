@@ -13,7 +13,8 @@ services:
     devices:
       - /dev/video0:/dev/video0   # USB camera
     volumes:
-      - model_cache:/opt/deepstream/models   # Caches ONNX + TRT engine across restarts
+      - model_cache:/opt/deepstream/models        # Caches ONNX + TRT engine across restarts
+      - ./config:/opt/deepstream/config:ro        # Live config — no rebuild needed for changes
     restart: unless-stopped
     # host networking is required so NT4 can reach the roboRIO on the FRC field subnet
     network_mode: host

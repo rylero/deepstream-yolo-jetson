@@ -12,6 +12,10 @@ labelfile-path=/opt/deepstream/config/labels.txt
 
 batch-size=1
 
+# TRT workspace per tactic during engine build (MB) — default is ~16 MB which causes
+# most tactics to fail on Jetson; 256 MB lets TRT actually time and select optimal tactics
+workspace-size=256
+
 # network-mode: 0=FP32, 1=INT8, 2=FP16
 network-mode=2
 
