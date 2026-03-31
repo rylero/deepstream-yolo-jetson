@@ -2,8 +2,9 @@ cmake_minimum_required(VERSION 3.16)
 project(ds_nt_probe C CXX)  # CXX required by FetchContent internals
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
-pkg_check_modules(GLIB      REQUIRED glib-2.0)
+pkg_check_modules(GSTREAMER     REQUIRED gstreamer-1.0)
+pkg_check_modules(GSTREAMER_APP REQUIRED gstreamer-app-1.0)
+pkg_check_modules(GLIB          REQUIRED glib-2.0)
 
 set(DS_ROOT /opt/nvidia/deepstream/deepstream)
 
@@ -45,6 +46,7 @@ target_compile_options(ds_nt_probe PRIVATE -Wall -Wextra)
 
 target_include_directories(ds_nt_probe PRIVATE
     ${GSTREAMER_INCLUDE_DIRS}
+    ${GSTREAMER_APP_INCLUDE_DIRS}
     ${GLIB_INCLUDE_DIRS}
     ${DS_ROOT}/sources/includes
     ${wpiutil_headers_SOURCE_DIR}
@@ -58,12 +60,14 @@ target_link_directories(ds_nt_probe PRIVATE
 
 target_link_libraries(ds_nt_probe PRIVATE
     ${GSTREAMER_LIBRARIES}
+    ${GSTREAMER_APP_LIBRARIES}
     ${GLIB_LIBRARIES}
     nvdsgst_meta
     nvds_meta
     ${ntcore_SO}
     ${wpiutil_SO}
     ${wpinet_SO}
+    pthread
 )
 
 # Copy WPILib .so files next to the binary so the RPATH finds them

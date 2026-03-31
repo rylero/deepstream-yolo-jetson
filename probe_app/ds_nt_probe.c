@@ -1,16 +1,20 @@
 /*
  * ds_nt_probe.c
  *
- * DeepStream YOLOv11n inference pipeline with NetworkTables publisher.
+ * DeepStream YOLOv11n inference pipeline with NetworkTables publisher
+ * and built-in MJPEG HTTP stream for driver-station viewing.
  *
  * Pipeline:
- *   v4l2src → capsfilter → nvvideoconvert → nvstreammux
- *     → nvinfer → fakesink
- *                  ^-- pad probe extracts NvDsBatchMeta and publishes
- *                      DetectionFrame structs as NT_RAW to /vision/detections
+ *   v4l2src → capsfilter → tee ─┬→ queue → nvvideoconvert → nvstreammux
+ *                                │              → nvinfer → fakesink
+ *                                │         ^── pad probe publishes NT_RAW
+ *                                └→ queue → videoconvert → jpegenc → appsink
+ *                                                          ^── HTTP thread serves
+ *                                                              MJPEG on port 8080
  *
  * Build: see CMakeLists.txt
  * Run:   NT_TEAM_NUMBER=XXXX ./ds_nt_probe
+ * View:  http://<jetson-ip>:8080/
  */
 
 #include <stdio.h>
@@ -18,7 +22,12 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
 #include <gst/gst.h>
+#include <gst/app/gstappsink.h>
 #include <glib.h>
 
 /* DeepStream metadata headers (from /opt/nvidia/deepstream/deepstream/sources/includes) */
@@ -55,6 +64,179 @@ static int64_t now_us(void)
 
 #define INFER_CONFIG "/opt/deepstream/config/config_infer_primary_yolo11n.txt"
 #define VIDEO_DEVICE "/dev/video0"
+
+/* ------------------------------------------------------------------ */
+/* MJPEG HTTP server                                                    */
+/* ------------------------------------------------------------------ */
+
+#define MJPEG_PORT     8080
+#define MJPEG_BOUNDARY "mjpegboundary"
+
+typedef struct {
+    guint8 *data;
+    gsize   size;
+} JpegFrame;
+
+static JpegFrame       g_jpeg        = { NULL, 0 };
+static pthread_mutex_t g_jpeg_mutex  = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_jpeg_cond   = PTHREAD_COND_INITIALIZER;
+static gboolean        g_jpeg_ready  = FALSE;
+
+/* Called by appsink on every new JPEG buffer */
+static GstFlowReturn on_new_jpeg_sample(GstElement *sink, gpointer user_data)
+{
+    (void)user_data;
+
+    GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+    if (!sample)
+        return GST_FLOW_OK;
+
+    GstBuffer *buf = gst_sample_get_buffer(sample);
+    GstMapInfo map;
+    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
+        gst_sample_unref(sample);
+        return GST_FLOW_OK;
+    }
+
+    pthread_mutex_lock(&g_jpeg_mutex);
+    g_free(g_jpeg.data);
+    g_jpeg.data  = (guint8 *)g_memdup2(map.data, map.size);
+    g_jpeg.size  = map.size;
+    g_jpeg_ready = TRUE;
+    pthread_cond_broadcast(&g_jpeg_cond);
+    pthread_mutex_unlock(&g_jpeg_mutex);
+
+    gst_buffer_unmap(buf, &map);
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+}
+
+static const char *HTML_PAGE =
+    "<!DOCTYPE html><html><head><title>DeepStream Vision</title>"
+    "<style>"
+    "body{margin:0;background:#111;display:flex;flex-direction:column;"
+    "align-items:center;justify-content:center;min-height:100vh;"
+    "color:#eee;font-family:sans-serif;gap:12px;}"
+    "img{max-width:100%;border:2px solid #444;border-radius:4px;}"
+    "h2{margin:0;font-size:1.2rem;letter-spacing:0.05em;}"
+    "</style></head>"
+    "<body>"
+    "<h2>DeepStream YOLOv11n Live Feed</h2>"
+    "<img src=\"/stream\" alt=\"Live stream\">"
+    "</body></html>";
+
+static void send_all(int fd, const void *data, size_t len)
+{
+    const char *p = (const char *)data;
+    while (len > 0) {
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
+        if (n <= 0) return;
+        p   += n;
+        len -= (size_t)n;
+    }
+}
+
+static void *handle_client(void *arg)
+{
+    int fd = *(int *)arg;
+    g_free(arg);
+
+    /* Read HTTP request */
+    char req[512] = {0};
+    recv(fd, req, sizeof(req) - 1, 0);
+
+    gboolean is_stream = (strstr(req, "GET /stream") != NULL);
+    gboolean is_root   = (strstr(req, "GET / ")      != NULL ||
+                          strstr(req, "GET /\r")      != NULL);
+
+    if (is_root) {
+        char hdr[256];
+        int  hlen = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n\r\n",
+            strlen(HTML_PAGE));
+        send_all(fd, hdr,       (size_t)hlen);
+        send_all(fd, HTML_PAGE, strlen(HTML_PAGE));
+
+    } else if (is_stream) {
+        const char *resp_hdr =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: multipart/x-mixed-replace;boundary=" MJPEG_BOUNDARY "\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n\r\n";
+        send_all(fd, resp_hdr, strlen(resp_hdr));
+
+        while (1) {
+            pthread_mutex_lock(&g_jpeg_mutex);
+            while (!g_jpeg_ready)
+                pthread_cond_wait(&g_jpeg_cond, &g_jpeg_mutex);
+            guint8 *frame = (guint8 *)g_memdup2(g_jpeg.data, g_jpeg.size);
+            gsize   fsz   = g_jpeg.size;
+            g_jpeg_ready  = FALSE;
+            pthread_mutex_unlock(&g_jpeg_mutex);
+
+            char part_hdr[256];
+            int  phlen = snprintf(part_hdr, sizeof(part_hdr),
+                "--" MJPEG_BOUNDARY "\r\n"
+                "Content-Type: image/jpeg\r\n"
+                "Content-Length: %zu\r\n\r\n", fsz);
+
+            if (send(fd, part_hdr, (size_t)phlen, MSG_NOSIGNAL) <= 0 ||
+                send(fd, frame,    fsz,            MSG_NOSIGNAL) <= 0 ||
+                send(fd, "\r\n",   2,              MSG_NOSIGNAL) <= 0) {
+                g_free(frame);
+                break;
+            }
+            g_free(frame);
+        }
+    } else {
+        const char *not_found =
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n";
+        send_all(fd, not_found, strlen(not_found));
+    }
+
+    close(fd);
+    return NULL;
+}
+
+static void *http_server_thread(void *arg)
+{
+    (void)arg;
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) { perror("[HTTP] socket"); return NULL; }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(MJPEG_PORT);
+
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("[HTTP] bind"); close(server_fd); return NULL;
+    }
+    listen(server_fd, 10);
+
+    printf("[HTTP] MJPEG stream →  http://<jetson-ip>:%d/\n", MJPEG_PORT);
+
+    while (1) {
+        int client_fd = accept(server_fd, NULL, NULL);
+        if (client_fd < 0) continue;
+
+        int *pfd = (int *)g_malloc(sizeof(int));
+        *pfd = client_fd;
+        pthread_t t;
+        pthread_create(&t, NULL, handle_client, pfd);
+        pthread_detach(t);
+    }
+    return NULL;
+}
 
 /* ------------------------------------------------------------------ */
 /* NetworkTables setup                                                  */
@@ -226,8 +408,9 @@ static void sigint_handler(int sig)
 
 int main(int argc, char *argv[])
 {
-    GstElement *pipeline, *source, *capsfilter, *vidconv,
-               *streammux, *infer, *sink;
+    GstElement *pipeline, *source, *capsfilter, *tee;
+    GstElement *queue_infer, *vidconv, *streammux, *infer, *sink;
+    GstElement *queue_web, *vidconv_web, *jpegenc, *appsink_web;
     GstBus     *bus;
     GstPad     *infer_src_pad;
     GstCaps    *caps;
@@ -240,16 +423,27 @@ int main(int argc, char *argv[])
     nt_init();
 
     /* ---- Build pipeline elements ---- */
-    pipeline   = gst_pipeline_new("ds-nt-pipeline");
-    source     = gst_element_factory_make("v4l2src",       "v4l2-source");
-    capsfilter = gst_element_factory_make("capsfilter",    "caps-filter");
-    vidconv    = gst_element_factory_make("nvvideoconvert", "nv-vidconv");
-    streammux  = gst_element_factory_make("nvstreammux",   "stream-muxer");
-    infer      = gst_element_factory_make("nvinfer",       "primary-nvinference");
-    sink       = gst_element_factory_make("fakesink",      "fake-sink");
+    pipeline    = gst_pipeline_new("ds-nt-pipeline");
+    source      = gst_element_factory_make("v4l2src",       "v4l2-source");
+    capsfilter  = gst_element_factory_make("capsfilter",    "caps-filter");
+    tee         = gst_element_factory_make("tee",           "vid-tee");
 
-    if (!pipeline || !source || !capsfilter || !vidconv ||
-        !streammux || !infer || !sink) {
+    /* Inference branch */
+    queue_infer = gst_element_factory_make("queue",          "queue-infer");
+    vidconv     = gst_element_factory_make("nvvideoconvert", "nv-vidconv");
+    streammux   = gst_element_factory_make("nvstreammux",    "stream-muxer");
+    infer       = gst_element_factory_make("nvinfer",        "primary-nvinference");
+    sink        = gst_element_factory_make("fakesink",       "fake-sink");
+
+    /* Web stream branch */
+    queue_web   = gst_element_factory_make("queue",          "queue-web");
+    vidconv_web = gst_element_factory_make("videoconvert",   "vid-conv-web");
+    jpegenc     = gst_element_factory_make("jpegenc",        "jpeg-enc");
+    appsink_web = gst_element_factory_make("appsink",        "web-appsink");
+
+    if (!pipeline || !source || !capsfilter || !tee ||
+        !queue_infer || !vidconv || !streammux || !infer || !sink ||
+        !queue_web || !vidconv_web || !jpegenc || !appsink_web) {
         fprintf(stderr, "[Error] Failed to create GStreamer elements\n");
         return -1;
     }
@@ -278,13 +472,39 @@ int main(int argc, char *argv[])
 
     g_object_set(G_OBJECT(sink), "sync", FALSE, NULL);
 
+    /* Web branch: 50% quality JPEG, drop old frames so HTTP clients always get fresh ones */
+    g_object_set(G_OBJECT(jpegenc), "quality", 50, NULL);
+    g_object_set(G_OBJECT(appsink_web),
+                 "emit-signals", TRUE,
+                 "sync",         FALSE,
+                 "max-buffers",  1,
+                 "drop",         TRUE,
+                 NULL);
+    g_signal_connect(appsink_web, "new-sample",
+                     G_CALLBACK(on_new_jpeg_sample), NULL);
+
     /* ---- Assemble pipeline ---- */
     gst_bin_add_many(GST_BIN(pipeline),
-                     source, capsfilter, vidconv, streammux, infer, sink, NULL);
+                     source, capsfilter, tee,
+                     queue_infer, vidconv, streammux, infer, sink,
+                     queue_web, vidconv_web, jpegenc, appsink_web,
+                     NULL);
 
-    /* v4l2src → capsfilter → nvvideoconvert */
-    if (!gst_element_link_many(source, capsfilter, vidconv, NULL)) {
-        fprintf(stderr, "[Error] Failed to link source → capsfilter → vidconv\n");
+    /* v4l2src → capsfilter → tee */
+    if (!gst_element_link_many(source, capsfilter, tee, NULL)) {
+        fprintf(stderr, "[Error] Failed to link source → capsfilter → tee\n");
+        return -1;
+    }
+
+    /* tee → queue_infer (GStreamer auto-requests tee src_%u pad) */
+    if (!gst_element_link(tee, queue_infer)) {
+        fprintf(stderr, "[Error] Failed to link tee → queue_infer\n");
+        return -1;
+    }
+
+    /* queue_infer → nvvideoconvert */
+    if (!gst_element_link(queue_infer, vidconv)) {
+        fprintf(stderr, "[Error] Failed to link queue_infer → nvvideoconvert\n");
         return -1;
     }
 
@@ -303,6 +523,16 @@ int main(int argc, char *argv[])
     /* nvstreammux → nvinfer → fakesink */
     if (!gst_element_link_many(streammux, infer, sink, NULL)) {
         fprintf(stderr, "[Error] Failed to link streammux → infer → sink\n");
+        return -1;
+    }
+
+    /* tee → queue_web → videoconvert → jpegenc → appsink_web */
+    if (!gst_element_link(tee, queue_web)) {
+        fprintf(stderr, "[Error] Failed to link tee → queue_web\n");
+        return -1;
+    }
+    if (!gst_element_link_many(queue_web, vidconv_web, jpegenc, appsink_web, NULL)) {
+        fprintf(stderr, "[Error] Failed to link web branch\n");
         return -1;
     }
 
@@ -326,6 +556,11 @@ int main(int argc, char *argv[])
     /* ---- Signal handler ---- */
     signal(SIGINT,  sigint_handler);
     signal(SIGTERM, sigint_handler);
+
+    /* ---- Start MJPEG HTTP server thread ---- */
+    pthread_t http_tid;
+    pthread_create(&http_tid, NULL, http_server_thread, NULL);
+    pthread_detach(http_tid);
 
     /* ---- Start pipeline ---- */
     printf("[DS] Starting pipeline (first run builds TRT engine — please wait)...\n");
