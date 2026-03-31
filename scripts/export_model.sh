@@ -10,7 +10,7 @@
 set -euo pipefail
 
 MODEL_DIR=/opt/deepstream/models
-ONNX="$MODEL_DIR/yolo11n.pt.onnx"
+ONNX="$MODEL_DIR/yolo11n.onnx"
 DEEPSTREAM_YOLO=/opt/deepstream/DeepStream-Yolo
 ULTRALYTICS_DIR=/opt/ultralytics
 SO="$DEEPSTREAM_YOLO/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"
@@ -55,7 +55,7 @@ if [ ! -f "$ONNX" ]; then
     echo "[export] Using $EXPORT_SCRIPT"
     python3 "$EXPORT_SCRIPT" -w yolo11n.pt --simplify --dynamic
 
-    cp yolo11n.pt.onnx "$MODEL_DIR/"
+    cp yolo11n.onnx "$MODEL_DIR/"
     # Copy labels.txt only if it doesn't already exist in config
     if [ -f "labels.txt" ]; then
         cp labels.txt "$MODEL_DIR/"
