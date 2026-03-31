@@ -32,7 +32,9 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install --no-cache-dir \
         ultralytics \
         onnxslim \
-        onnx
+        onnx \
+        onnxscript \
+        onnxruntime
 
 # ------------------------------------------------------------------ #
 # DeepStream-Yolo (custom TensorRT parser + export utilities)          #
