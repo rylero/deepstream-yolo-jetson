@@ -28,6 +28,9 @@
 /* WPILib NetworkTables C API */
 #include <ntcore.h>
 
+/* WPILib 2025 uses WPI_String instead of const char* for string args */
+#define WPI_STR(s) ((struct WPI_String){ (s), sizeof(s) - 1 })
+
 #include "detection_types.h"
 
 /* ------------------------------------------------------------------ */
@@ -63,7 +66,7 @@ static void nt_init(void)
     unsigned int team    = team_str ? (unsigned int)atoi(team_str) : 0;
 
     g_nt_inst = NT_GetDefaultInstance();
-    NT_StartClient4(g_nt_inst, "jetson-vision");
+    NT_StartClient4(g_nt_inst, &WPI_STR("jetson-vision"));
 
     if (team > 0) {
         printf("[NT] Connecting to team %u roboRIO\n", team);
@@ -71,11 +74,11 @@ static void nt_init(void)
     } else {
         /* Fallback: connect to roborio-0-frc.local if no team set */
         fprintf(stderr, "[NT] Warning: NT_TEAM_NUMBER not set. Trying roborio-0-frc.local\n");
-        NT_SetServer(g_nt_inst, "roborio-0-frc.local", 1735);
+        NT_SetServer(g_nt_inst, &WPI_STR("roborio-0-frc.local"), 1735);
     }
 
-    NT_Topic topic = NT_GetTopic(g_nt_inst, "/vision/detections");
-    g_nt_pub = NT_Publish(topic, NT_RAW, "raw", NULL, 0);
+    NT_Topic topic = NT_GetTopic(g_nt_inst, &WPI_STR("/vision/detections"));
+    g_nt_pub = NT_Publish(topic, NT_RAW, &WPI_STR("raw"), NULL);
 
     printf("[NT] Publisher created for /vision/detections\n");
 }
