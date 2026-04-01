@@ -11,6 +11,7 @@ set -euo pipefail
 
 MODEL_DIR=/opt/deepstream/models
 ONNX="$MODEL_DIR/yolo11n.onnx"
+ENGINE="$MODEL_DIR/yolo11n_b1_gpu0_fp16.engine"
 DEEPSTREAM_YOLO=/opt/deepstream/DeepStream-Yolo
 ULTRALYTICS_DIR=/opt/ultralytics
 SO="$DEEPSTREAM_YOLO/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"
@@ -53,7 +54,10 @@ if [ ! -f "$ONNX" ]; then
     fi
 
     echo "[export] Using $EXPORT_SCRIPT"
-    python3 "$EXPORT_SCRIPT" -w yolo11n.pt --simplify --dynamic
+    # -s 320: use 320x320 input instead of 640x640 — intermediate tensors are 4x smaller,
+    # which keeps TRT tactic memory under the ~26 MB CUDA budget available on the Jetson.
+    # --dynamic is omitted so TRT builds a fixed-batch engine (simpler, less memory).
+    python3 "$EXPORT_SCRIPT" -w yolo11n.pt -s 320 --simplify
 
     cp yolo11n.onnx "$MODEL_DIR/"
     # Copy labels.txt only if it doesn't already exist in config
@@ -76,6 +80,50 @@ if [ ! -f "$SO" ]; then
     echo "[export] Custom parser library built: $SO"
 else
     echo "[export] Custom parser library already exists, skipping compile."
+fi
+
+# ------------------------------------------------------------------ #
+# 3. Pre-build TRT engine with trtexec                                 #
+#                                                                      #
+# This runs BEFORE ds_nt_probe (and before GStreamer/DeepStream        #
+# allocate NVMM buffers), so CUDA has far more free memory available   #
+# for tactic selection. When nvinfer finds the engine file on disk it  #
+# loads it directly without rebuilding.                                #
+# ------------------------------------------------------------------ #
+if [ ! -f "$ENGINE" ]; then
+    echo "[export] Building TRT FP16 engine with trtexec (this takes several minutes)..."
+
+    # Locate trtexec — path varies by TRT/JetPack version
+    TRTEXEC=""
+    for candidate in \
+        /usr/src/tensorrt/bin/trtexec \
+        /usr/bin/trtexec \
+        /opt/tensorrt/bin/trtexec; do
+        if [ -x "$candidate" ]; then
+            TRTEXEC="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$TRTEXEC" ]; then
+        echo "[export] WARNING: trtexec not found; nvinfer will build the engine on first run."
+    else
+        export CUDA_VER=12.6
+        "$TRTEXEC" \
+            --onnx="$ONNX" \
+            --saveEngine="$ENGINE" \
+            --fp16 \
+            --memPoolSize=workspace:256 \
+            --verbose 2>&1 | grep -E '^\[|^&|\[export\]|TRT-|error|Error|warning|Warning|Building|Completed' || true
+
+        if [ -f "$ENGINE" ]; then
+            echo "[export] TRT engine built successfully: $ENGINE"
+        else
+            echo "[export] WARNING: trtexec did not produce an engine; nvinfer will rebuild on first run."
+        fi
+    fi
+else
+    echo "[export] TRT engine already exists, skipping trtexec build."
 fi
 
 echo "[export] Setup complete."
