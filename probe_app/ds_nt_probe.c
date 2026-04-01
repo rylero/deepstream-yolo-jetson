@@ -35,6 +35,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/videodev2.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <glib.h>
@@ -63,6 +66,9 @@ static int           g_num_cameras  = 1;
 /* Per-source FPS tracking */
 static float    g_fps[MAX_CAMERAS]     = {0};
 static int64_t  g_last_ts[MAX_CAMERAS] = {0};
+
+/* Camera device paths (populated in main, read by HTTP /set handler) */
+static char g_cam_paths[MAX_CAMERAS][32];
 #define FPS_ALPHA 0.1f
 
 static int64_t now_us(void)
@@ -108,14 +114,90 @@ static GstFlowReturn on_new_jpeg_sample(GstElement *sink, gpointer user_data)
     return GST_FLOW_OK;
 }
 
-static const char *HTML_PAGE =
-    "<!DOCTYPE html><html><head><title>DeepStream Vision</title>"
-    "<style>body{margin:0;background:#111;display:flex;flex-direction:column;"
-    "align-items:center;justify-content:center;min-height:100vh;color:#eee;"
-    "font-family:sans-serif;gap:12px;}img{max-width:100%;border:2px solid #444;"
-    "border-radius:4px;}h2{margin:0;font-size:1.2rem;}</style></head>"
-    "<body><h2>DeepStream YOLOv11n — Tiled View</h2>"
-    "<img src=\"/stream\" alt=\"Live stream\"></body></html>";
+/* ---- v4l2 camera control ---- */
+
+static void v4l2_set_ctrl(int cam_idx, uint32_t ctrl_id, int value)
+{
+    int start = (cam_idx < 0) ? 0 : cam_idx;
+    int end   = (cam_idx < 0) ? g_num_cameras : cam_idx + 1;
+    for (int i = start; i < end; i++) {
+        int fd = open(g_cam_paths[i], O_RDWR | O_NONBLOCK);
+        if (fd < 0) { fprintf(stderr, "[v4l2] open %s: %m\n", g_cam_paths[i]); continue; }
+        struct v4l2_control ctrl = { .id = ctrl_id, .value = value };
+        if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0)
+            fprintf(stderr, "[v4l2] VIDIOC_S_CTRL id=%u val=%d on %s: %m\n",
+                    ctrl_id, value, g_cam_paths[i]);
+        close(fd);
+    }
+}
+
+static int query_param_int(const char *qs, const char *name, int def)
+{
+    char needle[40];
+    snprintf(needle, sizeof(needle), "%s=", name);
+    const char *p = strstr(qs, needle);
+    return p ? atoi(p + strlen(needle)) : def;
+}
+
+/* ---- Dynamic HTML page (built once at startup) ---- */
+
+static char  g_html_page[8192];
+static size_t g_html_len = 0;
+
+static void build_html(int num_cameras)
+{
+    char opts[128] = "";
+    for (int i = 0; i < num_cameras; i++) {
+        char opt[32];
+        snprintf(opt, sizeof(opt), "<option value='%d'>Cam %d</option>", i, i);
+        strncat(opts, opt, sizeof(opts) - strlen(opts) - 1);
+    }
+
+    g_html_len = (size_t)snprintf(g_html_page, sizeof(g_html_page),
+        "<!DOCTYPE html><html><head><title>DeepStream Vision</title>"
+        "<style>"
+        "body{margin:0;background:#111;color:#eee;font-family:sans-serif;"
+        "display:flex;flex-direction:column;align-items:center;padding:16px;gap:16px;}"
+        "img{max-width:100%%;border:2px solid #444;border-radius:4px;}"
+        "h2{margin:0;font-size:1.2rem;}"
+        ".panel{display:flex;flex-wrap:wrap;gap:20px;background:#1e1e1e;"
+        "padding:14px 20px;border-radius:6px;width:100%%;max-width:900px;box-sizing:border-box;}"
+        ".grp{display:flex;flex-direction:column;gap:6px;min-width:180px;}"
+        ".grp label{font-size:.82rem;color:#aaa;}"
+        "input[type=range]{width:170px;accent-color:#4af;}"
+        "select,input[type=checkbox]{accent-color:#4af;}"
+        "</style></head>"
+        "<body>"
+        "<h2>DeepStream YOLOv11n &#8212; Tiled View</h2>"
+        "<img src='/stream' alt='Live stream'>"
+        "<div class='panel'>"
+          "<div class='grp'><label>Camera</label>"
+            "<select id='cam'><option value='-1'>All</option>%s</select></div>"
+          "<div class='grp'>"
+            "<label>Brightness: <b id='bv'>128</b></label>"
+            "<input type='range' id='b' min='0' max='255' value='128'></div>"
+          "<div class='grp'>"
+            "<label><input type='checkbox' id='ae' checked> Auto Exposure</label>"
+            "<label>Exposure (1/10 ms): <b id='ev'>300</b></label>"
+            "<input type='range' id='e' min='1' max='2000' value='300' disabled></div>"
+        "</div>"
+        "<script>"
+        "const NC=%d;"
+        "const camTargets=()=>{const v=document.getElementById('cam').value;"
+          "return v=='-1'?[...Array(NC).keys()]:[parseInt(v)];};"
+        "const post=(p)=>camTargets().forEach(c=>fetch('/set?cam='+c+'&'+p));"
+        "const b=document.getElementById('b');"
+        "b.oninput=()=>{document.getElementById('bv').textContent=b.value;"
+          "post('brightness='+b.value);};"
+        "const ae=document.getElementById('ae'),e=document.getElementById('e');"
+        "ae.onchange=()=>{e.disabled=ae.checked;"
+          "post('auto_exposure='+(ae.checked?3:1));};"
+        "e.oninput=()=>{document.getElementById('ev').textContent=e.value;"
+          "post('exposure='+e.value);};"
+        "</script>"
+        "</body></html>",
+        opts, num_cameras);
+}
 
 static void send_all(int fd, const void *data, size_t len)
 {
@@ -139,9 +221,27 @@ static void *handle_client(void *arg)
         char hdr[256];
         int hlen = snprintf(hdr, sizeof(hdr),
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-            "Content-Length: %zu\r\nConnection: close\r\n\r\n", strlen(HTML_PAGE));
+            "Content-Length: %zu\r\nConnection: close\r\n\r\n", g_html_len);
         send_all(fd, hdr, (size_t)hlen);
-        send_all(fd, HTML_PAGE, strlen(HTML_PAGE));
+        send_all(fd, g_html_page, g_html_len);
+
+    } else if (strstr(req, "GET /set?")) {
+        /* Camera control: /set?cam=N&brightness=X  or  &auto_exposure=3  or  &exposure=Y */
+        char *qs = strstr(req, "/set?") + 5;
+        int cam  = query_param_int(qs, "cam", -1);
+
+        if (strstr(qs, "brightness="))
+            v4l2_set_ctrl(cam, V4L2_CID_BRIGHTNESS,
+                          query_param_int(qs, "brightness", 128));
+        if (strstr(qs, "auto_exposure="))
+            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_AUTO,
+                          query_param_int(qs, "auto_exposure", 3));
+        if (strstr(qs, "exposure="))
+            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_ABSOLUTE,
+                          query_param_int(qs, "exposure", 300));
+
+        send_all(fd,
+            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", 47);
 
     } else if (strstr(req, "GET /stream")) {
         const char *hdr =
@@ -436,7 +536,12 @@ int main(int argc, char *argv[])
             snprintf(camera_device[i], sizeof(camera_device[0]), VIDEO_DEVICE_FMT, i * 2);
     }
 
+    /* Copy device paths to global so HTTP /set handler can reach them */
+    for (int i = 0; i < g_num_cameras; i++)
+        strncpy(g_cam_paths[i], camera_device[i], sizeof(g_cam_paths[0]) - 1);
+
     nt_init(g_num_cameras);
+    build_html(g_num_cameras);
 
     /* ---- Tiler layout: 1 row × N columns ---- */
     int tiler_cols = g_num_cameras;
