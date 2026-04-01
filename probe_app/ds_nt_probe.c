@@ -470,6 +470,7 @@ int main(int argc, char *argv[])
     /* ---- Per-source elements (camera mode) ---- */
     GstElement *source  [MAX_CAMERAS] = {NULL};
     GstElement *caps_f  [MAX_CAMERAS] = {NULL};
+    GstElement *jpegdec [MAX_CAMERAS] = {NULL};
     GstElement *vidconv [MAX_CAMERAS] = {NULL};
 
     if (use_file) {
@@ -479,16 +480,18 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], vc_name[32];
+            char src_name[32], caps_name[32], dec_name[32], vc_name[32];
             snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",    i);
             snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
+            snprintf(dec_name,  sizeof(dec_name),  "jpegdec-%d",     i);
             snprintf(vc_name,   sizeof(vc_name),   "nv-vidconv-%d",  i);
 
             source [i] = gst_element_factory_make("v4l2src",        src_name);
             caps_f [i] = gst_element_factory_make("capsfilter",      caps_name);
+            jpegdec[i] = gst_element_factory_make("jpegdec",         dec_name);
             vidconv[i] = gst_element_factory_make("nvvideoconvert",  vc_name);
 
-            if (!source[i] || !caps_f[i] || !vidconv[i]) {
+            if (!source[i] || !caps_f[i] || !jpegdec[i] || !vidconv[i]) {
                 fprintf(stderr, "[Error] Failed to create elements for camera %d\n", i);
                 return -1;
             }
@@ -496,9 +499,10 @@ int main(int argc, char *argv[])
             g_object_set(source[i], "device", camera_device[i], NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
-            /* Request 120fps; let the camera negotiate resolution and format.
-             * nvstreammux will scale to FRAME_WIDTH×FRAME_HEIGHT anyway. */
-            GstCaps *caps = gst_caps_from_string("video/x-raw,framerate=120/1");
+            /* MJPEG @ 640×480 @ 120fps — camera supports this natively.
+             * jpegdec decodes to raw, nvvideoconvert converts for nvstreammux. */
+            GstCaps *caps = gst_caps_from_string(
+                "image/jpeg,width=640,height=480,framerate=120/1");
             g_object_set(caps_f[i], "caps", caps, NULL);
             gst_caps_unref(caps);
         }
@@ -538,14 +542,14 @@ int main(int argc, char *argv[])
         gst_bin_add(GST_BIN(pipeline), source[0]);
     } else {
         for (int i = 0; i < g_num_cameras; i++)
-            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], vidconv[i], NULL);
+            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], jpegdec[i], vidconv[i], NULL);
     }
 
     /* ---- Link sources → streammux ---- */
     if (!use_file) {
         for (int i = 0; i < g_num_cameras; i++) {
-            /* v4l2src → capsfilter → nvvideoconvert */
-            if (!gst_element_link_many(source[i], caps_f[i], vidconv[i], NULL)) {
+            /* v4l2src → capsfilter (MJPEG) → jpegdec → nvvideoconvert */
+            if (!gst_element_link_many(source[i], caps_f[i], jpegdec[i], vidconv[i], NULL)) {
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
