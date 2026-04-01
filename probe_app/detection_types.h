@@ -24,28 +24,20 @@ typedef struct {
  *
  * Robot-side unpacking (Java example):
  *   ByteBuffer buf = ByteBuffer.wrap(rawBytes).order(ByteOrder.nativeOrder());
- *   int    frameNumber  = buf.getInt();
- *   int    numDets      = buf.getInt();
- *   long   timestampUs  = buf.getLong();   // microseconds since Unix epoch
- *   float  fps          = buf.getFloat();
- *   int    _reserved    = buf.getInt();    // skip padding
+ *   int    frameNumber  = buf.getInt();    //  0
+ *   int    numDets      = buf.getInt();    //  4
+ *   long   timestampUs  = buf.getLong();   //  8  microseconds since Unix epoch
+ *   float  fps          = buf.getFloat();  // 16
+ *   int    sourceId     = buf.getInt();    // 20  camera index (0, 1, ...)
  *   for (int i = 0; i < numDets; i++) { ... }
  *
- * Layout (offsets):
- *   0  frame_number    uint32
- *   4  num_detections  uint32
- *   8  timestamp_us    int64   (CLOCK_REALTIME, microseconds since Unix epoch)
- *  16  fps             float   (exponential moving average)
- *  20  _reserved       uint32  (padding)
- *  24  detections[]
- *
- * Published to NT topic: /vision/detections
+ * Published to NT topics: /vision/detections/0, /vision/detections/1, ...
  */
 typedef struct {
     uint32_t  frame_number;
     uint32_t  num_detections;
     int64_t   timestamp_us;   /* microseconds since Unix epoch (CLOCK_REALTIME) */
     float     fps;            /* exponential moving average FPS */
-    uint32_t  _reserved;      /* padding — keep detections[] 8-byte aligned */
+    uint32_t  source_id;      /* camera index — keeps detections[] 8-byte aligned */
     Detection detections[MAX_DETECTIONS];
 } DetectionFrame;

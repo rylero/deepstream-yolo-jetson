@@ -10,7 +10,7 @@ onnx-file=/opt/deepstream/models/yolo11n.onnx
 model-engine-file=/opt/deepstream/models/yolo11n_b1_gpu0_fp16.engine
 labelfile-path=/opt/deepstream/config/labels.txt
 
-batch-size=1
+batch-size=2
 
 # TRT workspace per tactic during engine build (MB) — default is ~16 MB which causes
 # most tactics to fail on Jetson; 256 MB lets TRT actually time and select optimal tactics

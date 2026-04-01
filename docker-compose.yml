@@ -14,8 +14,10 @@ services:
       # Unset (or empty) = v4l2src /dev/video0
       # Example: VIDEO_URI=file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4
       - VIDEO_URI=${VIDEO_URI:-}
+      - NUM_CAMERAS=${NUM_CAMERAS:-2}
     devices:
-      - /dev/video0:/dev/video0   # USB camera
+      - /dev/video0:/dev/video0   # USB camera 0
+      - /dev/video1:/dev/video1   # USB camera 1
     volumes:
       - model_cache:/opt/deepstream/models        # Caches ONNX + TRT engine across restarts
       - ./config:/opt/deepstream/config:ro        # Live config — no rebuild needed for changes
