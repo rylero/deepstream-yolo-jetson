@@ -309,6 +309,23 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
         NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
+        /* FPS overlay: add display text before nvdsosd renders it */
+        NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
+        if (dm) {
+            dm->num_labels = 1;
+            NvOSD_TextParams *tp = &dm->text_params[0];
+            tp->display_text = (char *)g_malloc(32);
+            snprintf(tp->display_text, 32, "cam%d  %.1f fps", src, g_fps[src]);
+            tp->x_offset = 8;
+            tp->y_offset = 8;
+            tp->font_params.font_name  = "Sans";
+            tp->font_params.font_size  = 14;
+            tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
+            tp->set_bg_clr  = 1;
+            tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
+            nvds_add_display_meta_to_frame(fm, dm);
+        }
+
         if (det.num_detections > 0)
             printf("[DS] cam%d frame %u: %u detection(s)  %.1f fps\n",
                    src, det.frame_number, det.num_detections, g_fps[src]);
@@ -424,8 +441,8 @@ int main(int argc, char *argv[])
     /* ---- Tiler layout: 1 row × N columns ---- */
     int tiler_cols = g_num_cameras;
     int tiler_rows = 1;
-    int tiled_w    = FRAME_WIDTH;   /* total output width  */
-    int tiled_h    = FRAME_HEIGHT;  /* total output height */
+    int tiled_w    = FRAME_WIDTH * g_num_cameras;  /* total output width  */
+    int tiled_h    = FRAME_HEIGHT;                 /* total output height */
 
     /* ---- Shared pipeline elements ---- */
     GstElement *pipeline    = gst_pipeline_new("ds-nt-pipeline");
@@ -490,7 +507,7 @@ int main(int argc, char *argv[])
     /* ---- Configure shared elements ---- */
     g_object_set(streammux,
                  "batch-size",           g_num_cameras,
-                 "width",                FRAME_WIDTH,
+                 "width",                FRAME_WIDTH,   /* per-stream; tiler scales to tiled_w */
                  "height",               FRAME_HEIGHT,
                  "batched-push-timeout", 40000,
                  "live-source",          use_file ? FALSE : TRUE,

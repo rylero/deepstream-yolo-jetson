@@ -2,8 +2,8 @@
 #include <stdint.h>
 
 #define MAX_DETECTIONS 64
-#define FRAME_WIDTH    1280
-#define FRAME_HEIGHT   720
+#define FRAME_WIDTH    640
+#define FRAME_HEIGHT   480
 
 /*
  * Single object detection result.
