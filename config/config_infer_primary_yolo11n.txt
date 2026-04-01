@@ -19,7 +19,7 @@ workspace-size=256
 # network-mode: 0=FP32, 1=INT8, 2=FP16
 network-mode=2
 
-num-detected-classes=80
+num-detected-classes=1
 interval=0
 gie-unique-id=1
 process-mode=1
