@@ -1,8 +1,9 @@
 #!/bin/bash
 # export_model.sh
 #
-# Downloads yolo11n.pt, converts to ONNX via DeepStream-Yolo's export script,
-# and compiles the custom TensorRT parser library (nvdsinfer_custom_impl_Yolo).
+# Converts the custom model (mounted at /opt/deepstream/models/custom_model.pt)
+# to ONNX via DeepStream-Yolo's export script, and compiles the custom TensorRT
+# parser library (nvdsinfer_custom_impl_Yolo).
 #
 # Skips work that has already been done (idempotent).
 # Called by entrypoint.sh on every container start.
@@ -10,8 +11,9 @@
 set -euo pipefail
 
 MODEL_DIR=/opt/deepstream/models
-ONNX="$MODEL_DIR/yolo11n.onnx"
-ENGINE="$MODEL_DIR/yolo11n_b1_gpu0_fp16.engine"
+CUSTOM_PT="$MODEL_DIR/custom_model.pt"
+ONNX="$MODEL_DIR/custom_yolo11n.onnx"
+ENGINE="$MODEL_DIR/custom_yolo11n_b1_gpu0_fp16.engine"
 DEEPSTREAM_YOLO=/opt/deepstream/DeepStream-Yolo
 ULTRALYTICS_DIR=/opt/ultralytics
 SO="$DEEPSTREAM_YOLO/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"
@@ -22,22 +24,25 @@ export CUDA_VER=12.6
 # 1. Export ONNX model                                                 #
 # ------------------------------------------------------------------ #
 if [ ! -f "$ONNX" ]; then
-    echo "[export] Downloading yolo11n.pt..."
-    wget -q --show-progress \
-        -O "$ULTRALYTICS_DIR/yolo11n.pt" \
-        "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n.pt"
+    if [ ! -f "$CUSTOM_PT" ]; then
+        echo "[export] ERROR: Custom model not found at $CUSTOM_PT" >&2
+        echo "[export] Ensure 640-yolo11n-fp32.pt is in the project root and" >&2
+        echo "[export] the docker-compose.yml volume mount is present." >&2
+        exit 1
+    fi
 
-    echo "[export] Exporting ONNX..."
+    echo "[export] Exporting ONNX from custom model: $CUSTOM_PT"
     cd "$ULTRALYTICS_DIR"
 
+    # Copy model to ultralytics working dir
+    cp "$CUSTOM_PT" ./custom_model.pt
+
     # Search for the export script — name varies by DeepStream-Yolo version.
-    # Also check DeepStream-Yolo/utils directly in case the Dockerfile copy failed.
     EXPORT_SCRIPT=""
     SEARCH_DIRS="$ULTRALYTICS_DIR $DEEPSTREAM_YOLO/utils"
     for dir in $SEARCH_DIRS; do
         for candidate in export_yolo11.py export_yolo.py export_yoloV8.py export_yoloV26.py; do
             if [ -f "$dir/$candidate" ]; then
-                # Copy to ultralytics dir if found elsewhere
                 [ "$dir" != "$ULTRALYTICS_DIR" ] && cp "$dir/$candidate" "$ULTRALYTICS_DIR/"
                 EXPORT_SCRIPT="$candidate"
                 break 2
@@ -47,20 +52,17 @@ if [ ! -f "$ONNX" ]; then
 
     if [ -z "$EXPORT_SCRIPT" ]; then
         echo "[export] ERROR: No export script found." >&2
-        echo "[export] Searched: $SEARCH_DIRS" >&2
         echo "[export] Available in DeepStream-Yolo/utils:" >&2
         ls "$DEEPSTREAM_YOLO/utils/" >&2
         exit 1
     fi
 
     echo "[export] Using $EXPORT_SCRIPT"
-    # -s 320: use 320x320 input instead of 640x640 — intermediate tensors are 4x smaller,
-    # which keeps TRT tactic memory under the ~26 MB CUDA budget available on the Jetson.
-    # --dynamic is omitted so TRT builds a fixed-batch engine (simpler, less memory).
-    python3 "$EXPORT_SCRIPT" -w yolo11n.pt -s 320 --simplify
+    # -s 320: 320×320 inference input — 4× smaller intermediate tensors than 640,
+    # keeping TRT tactic memory within Jetson's ~26 MB CUDA budget.
+    python3 "$EXPORT_SCRIPT" -w custom_model.pt -s 320 --simplify
 
-    cp yolo11n.onnx "$MODEL_DIR/"
-    # Copy labels.txt only if it doesn't already exist in config
+    cp custom_model.onnx "$ONNX"
     if [ -f "labels.txt" ]; then
         cp labels.txt "$MODEL_DIR/"
     fi
