@@ -10,6 +10,10 @@ services:
       - NT_TEAM_NUMBER=${NT_TEAM_NUMBER:-0}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      # Set VIDEO_URI to use a file/RTSP source instead of the USB camera.
+      # Unset (or empty) = v4l2src /dev/video0
+      # Example: VIDEO_URI=file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4
+      - VIDEO_URI=${VIDEO_URI:-}
     devices:
       - /dev/video0:/dev/video0   # USB camera
     volumes:
