@@ -573,10 +573,9 @@ int main(int argc, char *argv[])
     }
 
     /* ---- Per-source elements (camera mode) ---- */
-    GstElement *source   [MAX_CAMERAS] = {NULL};
-    GstElement *caps_f   [MAX_CAMERAS] = {NULL};
-    GstElement *jpegparse[MAX_CAMERAS] = {NULL};
-    GstElement *nvdec    [MAX_CAMERAS] = {NULL};
+    GstElement *source [MAX_CAMERAS] = {NULL};
+    GstElement *caps_f [MAX_CAMERAS] = {NULL};
+    GstElement *nvdec  [MAX_CAMERAS] = {NULL};
 
     if (use_file) {
         source[0] = gst_element_factory_make("nvurisrcbin", "uri-source");
@@ -585,21 +584,18 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], parse_name[32], dec_name[32];
-            snprintf(src_name,   sizeof(src_name),   "v4l2-src-%d",    i);
-            snprintf(caps_name,  sizeof(caps_name),  "caps-filter-%d", i);
-            snprintf(parse_name, sizeof(parse_name), "jpegparse-%d",   i);
-            snprintf(dec_name,   sizeof(dec_name),   "nvv4l2dec-%d",   i);
+            char src_name[32], caps_name[32], dec_name[32];
+            snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",   i);
+            snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
+            snprintf(dec_name,  sizeof(dec_name),  "nvv4l2dec-%d",  i);
 
-            source    [i] = gst_element_factory_make("v4l2src",       src_name);
-            caps_f    [i] = gst_element_factory_make("capsfilter",     caps_name);
-            /* jpegparse converts image/jpeg → video/x-jpeg caps so nvv4l2decoder
-             * can accept the stream. nvv4l2decoder then uses Jetson hardware JPEG
-             * decode and outputs NVMM NV12 directly for nvstreammux.           */
-            jpegparse [i] = gst_element_factory_make("jpegparse",     parse_name);
-            nvdec     [i] = gst_element_factory_make("nvv4l2decoder", dec_name);
+            source[i] = gst_element_factory_make("v4l2src",       src_name);
+            caps_f[i] = gst_element_factory_make("capsfilter",     caps_name);
+            /* nvv4l2decoder: Jetson hardware MJPEG decoder — outputs NVMM NV12
+             * (proper NvBufSurface DMA buffers) for nvstreammux/nvinfer.       */
+            nvdec[i]  = gst_element_factory_make("nvv4l2decoder", dec_name);
 
-            if (!source[i] || !caps_f[i] || !jpegparse[i] || !nvdec[i]) {
+            if (!source[i] || !caps_f[i] || !nvdec[i]) {
                 fprintf(stderr, "[Error] Failed to create elements for camera %d\n", i);
                 return -1;
             }
@@ -649,28 +645,26 @@ int main(int argc, char *argv[])
         gst_bin_add(GST_BIN(pipeline), source[0]);
     } else {
         for (int i = 0; i < g_num_cameras; i++)
-            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], jpegparse[i], nvdec[i], NULL);
+            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], nvdec[i], NULL);
     }
 
     /* ---- Link sources → streammux ---- */
     if (!use_file) {
         for (int i = 0; i < g_num_cameras; i++) {
-            /* v4l2src → capsfilter (MJPEG) → jpegparse → nvv4l2decoder (NVMM NV12 out) */
-            if (!gst_element_link_many(source[i], caps_f[i], jpegparse[i], nvdec[i], NULL)) {
+            /* v4l2src → capsfilter (MJPEG) → nvv4l2decoder (NVMM NV12 out) */
+            if (!gst_element_link_many(source[i], caps_f[i], nvdec[i], NULL)) {
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
-            /* nvv4l2decoder → streammux sink_N */
+            /* nvv4l2decoder src → streammux sink_N
+             * Use gst_element_link_pads so streammux's request pad is handled
+             * correctly (get_static_pad races with nvv4l2decoder pad creation). */
             char pad_name[16];
             snprintf(pad_name, sizeof(pad_name), "sink_%d", i);
-            GstPad *mux_sink = gst_element_request_pad_simple(streammux, pad_name);
-            GstPad *dec_src  = gst_element_get_static_pad(nvdec[i], "src");
-            if (gst_pad_link(dec_src, mux_sink) != GST_PAD_LINK_OK) {
+            if (!gst_element_link_pads(nvdec[i], "src", streammux, pad_name)) {
                 fprintf(stderr, "[Error] Failed to link nvdec[%d] → streammux\n", i);
                 return -1;
             }
-            gst_object_unref(dec_src);
-            gst_object_unref(mux_sink);
         }
     }
     /* file mode: nvurisrcbin → streammux via on_pad_added callback */
