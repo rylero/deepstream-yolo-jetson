@@ -479,10 +479,9 @@ int main(int argc, char *argv[])
             g_object_set(source[i], "device", camera_device[i], NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
-            GstCaps *caps = gst_caps_from_string(
-                "video/x-raw,width=" G_STRINGIFY(FRAME_WIDTH)
-                ",height=" G_STRINGIFY(FRAME_HEIGHT)
-                ",framerate=30/1,format=YUY2");
+            /* Let v4l2src negotiate its native resolution/framerate.
+             * nvstreammux will scale to FRAME_WIDTH×FRAME_HEIGHT anyway. */
+            GstCaps *caps = gst_caps_from_string("video/x-raw");
             g_object_set(caps_f[i], "caps", caps, NULL);
             gst_caps_unref(caps);
         }
