@@ -373,20 +373,23 @@ int main(int argc, char *argv[])
         printf("[DS] Source: v4l2 camera (%s)\n", VIDEO_DEVICE);
 
     /* ---- Create elements ---- */
-    GstElement *pipeline  = gst_pipeline_new("ds-nt-pipeline");
-    GstElement *source    = NULL;
-    GstElement *capsfilter= NULL;
-    GstElement *vidconv   = NULL;   /* only for camera mode */
-    GstElement *streammux = gst_element_factory_make("nvstreammux",    "stream-muxer");
-    GstElement *infer     = gst_element_factory_make("nvinfer",        "primary-nvinference");
-    GstElement *tee       = gst_element_factory_make("tee",            "post-infer-tee");
-    GstElement *queue_inf = gst_element_factory_make("queue",          "queue-infer");
-    GstElement *sink      = gst_element_factory_make("fakesink",       "fake-sink");
-    GstElement *queue_web = gst_element_factory_make("queue",          "queue-web");
-    GstElement *nv2cpu    = gst_element_factory_make("nvvideoconvert", "nv-to-cpu");
-    GstElement *vcpucpu   = gst_element_factory_make("videoconvert",   "cpu-conv");
-    GstElement *jpegenc   = gst_element_factory_make("jpegenc",        "jpeg-enc");
-    GstElement *appsink   = gst_element_factory_make("appsink",        "web-appsink");
+    GstElement *pipeline    = gst_pipeline_new("ds-nt-pipeline");
+    GstElement *source      = NULL;
+    GstElement *capsfilter  = NULL;
+    GstElement *vidconv     = NULL;   /* only for camera mode */
+    GstElement *streammux   = gst_element_factory_make("nvstreammux",    "stream-muxer");
+    GstElement *infer       = gst_element_factory_make("nvinfer",        "primary-nvinference");
+    /* nvdsosd needs RGBA — convert from NV12 first */
+    GstElement *vidconv_osd = gst_element_factory_make("nvvideoconvert", "nv-vidconv-osd");
+    GstElement *nvdsosd     = gst_element_factory_make("nvdsosd",        "nv-onscreendisplay");
+    GstElement *tee         = gst_element_factory_make("tee",            "post-osd-tee");
+    GstElement *queue_inf   = gst_element_factory_make("queue",          "queue-infer");
+    GstElement *sink        = gst_element_factory_make("fakesink",       "fake-sink");
+    GstElement *queue_web   = gst_element_factory_make("queue",          "queue-web");
+    GstElement *nv2cpu      = gst_element_factory_make("nvvideoconvert", "nv-to-cpu");
+    GstElement *vcpucpu     = gst_element_factory_make("videoconvert",   "cpu-conv");
+    GstElement *jpegenc     = gst_element_factory_make("jpegenc",        "jpeg-enc");
+    GstElement *appsink     = gst_element_factory_make("appsink",        "web-appsink");
 
     if (use_file) {
         source = gst_element_factory_make("nvurisrcbin", "uri-source");
@@ -414,7 +417,7 @@ int main(int argc, char *argv[])
         gst_caps_unref(caps);
     }
 
-    if (!pipeline || !streammux || !infer || !tee ||
+    if (!pipeline || !streammux || !infer || !vidconv_osd || !nvdsosd || !tee ||
         !queue_inf || !sink || !queue_web || !nv2cpu || !vcpucpu || !jpegenc || !appsink) {
         fprintf(stderr, "[Error] Failed to create pipeline elements\n");
         return -1;
@@ -429,6 +432,7 @@ int main(int argc, char *argv[])
                  "live-source",          use_file ? FALSE : TRUE,
                  NULL);
     g_object_set(infer,   "config-file-path", INFER_CONFIG, NULL);
+    g_object_set(nvdsosd, "process-mode",     0,            NULL);  /* 0=CPU render */
     g_object_set(sink,    "sync",             FALSE,        NULL);
     g_object_set(jpegenc, "quality",          50,           NULL);
     g_object_set(appsink,
@@ -439,13 +443,13 @@ int main(int argc, char *argv[])
     /* ---- Add elements to bin ---- */
     if (use_file) {
         gst_bin_add_many(GST_BIN(pipeline),
-                         source, streammux, infer, tee,
+                         source, streammux, infer, vidconv_osd, nvdsosd, tee,
                          queue_inf, sink,
                          queue_web, nv2cpu, vcpucpu, jpegenc, appsink,
                          NULL);
     } else {
         gst_bin_add_many(GST_BIN(pipeline),
-                         source, capsfilter, vidconv, streammux, infer, tee,
+                         source, capsfilter, vidconv, streammux, infer, vidconv_osd, nvdsosd, tee,
                          queue_inf, sink,
                          queue_web, nv2cpu, vcpucpu, jpegenc, appsink,
                          NULL);
@@ -469,11 +473,22 @@ int main(int argc, char *argv[])
     }
     /* file: nvurisrcbin → streammux linked via on_pad_added callback */
 
-    /* streammux → nvinfer → tee */
-    if (!gst_element_link_many(streammux, infer, tee, NULL)) {
-        fprintf(stderr, "[Error] Failed to link streammux → infer → tee\n");
+    /* streammux → nvinfer */
+    if (!gst_element_link_many(streammux, infer, NULL)) {
+        fprintf(stderr, "[Error] Failed to link streammux → infer\n");
         return -1;
     }
+
+    /* nvinfer → nvvideoconvert (NV12 NVMM → RGBA NVMM) → nvdsosd → tee */
+    GstCaps *rgba_caps = gst_caps_from_string("video/x-raw(memory:NVMM),format=RGBA");
+    if (!gst_element_link_filtered(infer, vidconv_osd, NULL) ||
+        !gst_element_link_filtered(vidconv_osd, nvdsosd, rgba_caps) ||
+        !gst_element_link(nvdsosd, tee)) {
+        fprintf(stderr, "[Error] Failed to link infer → vidconv_osd → nvdsosd → tee\n");
+        gst_caps_unref(rgba_caps);
+        return -1;
+    }
+    gst_caps_unref(rgba_caps);
 
     /* tee → queue_inf → fakesink */
     if (!gst_element_link_many(tee, queue_inf, sink, NULL)) {
