@@ -395,6 +395,30 @@ int main(int argc, char *argv[])
         printf("[DS] Source: %d USB camera(s)\n", g_num_cameras);
     }
 
+    /* Parse CAMERA_DEVICES=  /dev/video0,/dev/video2  (overrides /dev/videoN default) */
+    char camera_device[MAX_CAMERAS][32];
+    const char *cam_devs_env = getenv("CAMERA_DEVICES");
+    if (cam_devs_env && cam_devs_env[0] != '\0') {
+        char buf[256];
+        strncpy(buf, cam_devs_env, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        int idx = 0;
+        char *tok = strtok(buf, ",");
+        while (tok && idx < MAX_CAMERAS) {
+            strncpy(camera_device[idx], tok, sizeof(camera_device[0]) - 1);
+            camera_device[idx][sizeof(camera_device[0]) - 1] = '\0';
+            idx++;
+            tok = strtok(NULL, ",");
+        }
+        /* Fill remaining with defaults if CAMERA_DEVICES has fewer entries than NUM_CAMERAS */
+        for (int i = idx; i < g_num_cameras; i++)
+            snprintf(camera_device[i], sizeof(camera_device[0]), VIDEO_DEVICE_FMT, i * 2);
+    } else {
+        /* Default: /dev/video0, /dev/video2, /dev/video4 ... (skip metadata nodes) */
+        for (int i = 0; i < g_num_cameras; i++)
+            snprintf(camera_device[i], sizeof(camera_device[0]), VIDEO_DEVICE_FMT, i * 2);
+    }
+
     nt_init(g_num_cameras);
 
     /* ---- Tiler layout: 1 row × N columns ---- */
@@ -438,11 +462,10 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], vc_name[32], device[32];
-            snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",  i);
+            char src_name[32], caps_name[32], vc_name[32];
+            snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",    i);
             snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
-            snprintf(vc_name,   sizeof(vc_name),   "nv-vidconv-%d", i);
-            snprintf(device,    sizeof(device),    VIDEO_DEVICE_FMT, i);
+            snprintf(vc_name,   sizeof(vc_name),   "nv-vidconv-%d",  i);
 
             source [i] = gst_element_factory_make("v4l2src",        src_name);
             caps_f [i] = gst_element_factory_make("capsfilter",      caps_name);
@@ -453,8 +476,8 @@ int main(int argc, char *argv[])
                 return -1;
             }
 
-            g_object_set(source[i], "device", device, NULL);
-            printf("[DS]   camera %d → %s\n", i, device);
+            g_object_set(source[i], "device", camera_device[i], NULL);
+            printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
             GstCaps *caps = gst_caps_from_string(
                 "video/x-raw,width=" G_STRINGIFY(FRAME_WIDTH)

@@ -15,9 +15,15 @@ services:
       # Example: VIDEO_URI=file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4
       - VIDEO_URI=${VIDEO_URI:-}
       - NUM_CAMERAS=${NUM_CAMERAS:-2}
+      # Comma-separated capture device paths. USB cameras expose 2 nodes each
+      # (video + metadata), so camera 0=/dev/video0, camera 1=/dev/video2, etc.
+      # Run: v4l2-ctl --list-devices   on the Jetson to confirm your paths.
+      - CAMERA_DEVICES=${CAMERA_DEVICES:-/dev/video0,/dev/video2}
     devices:
-      - /dev/video0:/dev/video0   # USB camera 0
-      - /dev/video1:/dev/video1   # USB camera 1
+      - /dev/video0:/dev/video0   # USB camera 0 (capture)
+      - /dev/video1:/dev/video1   # USB camera 0 (metadata — harmless to pass through)
+      - /dev/video2:/dev/video2   # USB camera 1 (capture)
+      - /dev/video3:/dev/video3   # USB camera 1 (metadata)
     volumes:
       - model_cache:/opt/deepstream/models        # Caches ONNX + TRT engine across restarts
       - ./config:/opt/deepstream/config:ro        # Live config — no rebuild needed for changes
