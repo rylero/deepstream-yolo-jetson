@@ -610,9 +610,11 @@ int main(int argc, char *argv[])
             g_object_set(nvdec[i],  "mjpeg",  TRUE,             NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
-            /* MJPEG 640×480 @ 120fps — camera supports this natively. */
-            GstCaps *caps = gst_caps_from_string(
-                "image/jpeg,width=640,height=480,framerate=120/1");
+            /* Only constrain the format to MJPEG — let v4l2src negotiate
+             * resolution and framerate freely with the camera device.
+             * The camera picks its highest-preference MJPEG mode (120fps).
+             * nvstreammux scales every stream to FRAME_WIDTH×FRAME_HEIGHT. */
+            GstCaps *caps = gst_caps_from_string("image/jpeg");
             g_object_set(caps_f[i], "caps", caps, NULL);
             gst_caps_unref(caps);
         }
@@ -623,7 +625,7 @@ int main(int argc, char *argv[])
                  "batch-size",           g_num_cameras,
                  "width",                FRAME_WIDTH,   /* per-stream; tiler scales to tiled_w */
                  "height",               FRAME_HEIGHT,
-                 "batched-push-timeout", 40000,
+                 "batched-push-timeout", 100000,
                  "live-source",          use_file ? FALSE : TRUE,
                  NULL);
     g_object_set(infer,   "config-file-path", INFER_CONFIG, NULL);
