@@ -573,9 +573,10 @@ int main(int argc, char *argv[])
     }
 
     /* ---- Per-source elements (camera mode) ---- */
-    GstElement *source [MAX_CAMERAS] = {NULL};
-    GstElement *caps_f [MAX_CAMERAS] = {NULL};
-    GstElement *nvdec  [MAX_CAMERAS] = {NULL};
+    GstElement *source   [MAX_CAMERAS] = {NULL};
+    GstElement *caps_f   [MAX_CAMERAS] = {NULL};
+    GstElement *src_queue[MAX_CAMERAS] = {NULL};
+    GstElement *nvdec    [MAX_CAMERAS] = {NULL};
 
     if (use_file) {
         source[0] = gst_element_factory_make("nvurisrcbin", "uri-source");
@@ -584,23 +585,29 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], dec_name[32];
-            snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",   i);
+            char src_name[32], caps_name[32], q_name[32], dec_name[32];
+            snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",    i);
             snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
-            snprintf(dec_name,  sizeof(dec_name),  "nvv4l2dec-%d",  i);
+            snprintf(q_name,    sizeof(q_name),    "src-queue-%d",   i);
+            snprintf(dec_name,  sizeof(dec_name),  "nvv4l2dec-%d",   i);
 
-            source[i] = gst_element_factory_make("v4l2src",       src_name);
-            caps_f[i] = gst_element_factory_make("capsfilter",     caps_name);
-            /* nvv4l2decoder: Jetson hardware MJPEG decoder — outputs NVMM NV12
-             * (proper NvBufSurface DMA buffers) for nvstreammux/nvinfer.       */
-            nvdec[i]  = gst_element_factory_make("nvv4l2decoder", dec_name);
+            source   [i] = gst_element_factory_make("v4l2src",       src_name);
+            caps_f   [i] = gst_element_factory_make("capsfilter",     caps_name);
+            /* queue decouples v4l2src from nvv4l2decoder so RECONFIGURE events
+             * from the decoder don't propagate back to v4l2src and cause
+             * not-negotiated errors at runtime.                                */
+            src_queue[i] = gst_element_factory_make("queue",          q_name);
+            /* nvv4l2decoder: Jetson hardware MJPEG decoder with mjpeg=TRUE to
+             * explicitly request MJPEG mode — outputs NVMM NV12 directly.     */
+            nvdec    [i] = gst_element_factory_make("nvv4l2decoder",  dec_name);
 
-            if (!source[i] || !caps_f[i] || !nvdec[i]) {
+            if (!source[i] || !caps_f[i] || !src_queue[i] || !nvdec[i]) {
                 fprintf(stderr, "[Error] Failed to create elements for camera %d\n", i);
                 return -1;
             }
 
             g_object_set(source[i], "device", camera_device[i], NULL);
+            g_object_set(nvdec[i],  "mjpeg",  TRUE,             NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
             /* MJPEG 640×480 @ 120fps — camera supports this natively. */
@@ -645,14 +652,14 @@ int main(int argc, char *argv[])
         gst_bin_add(GST_BIN(pipeline), source[0]);
     } else {
         for (int i = 0; i < g_num_cameras; i++)
-            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], nvdec[i], NULL);
+            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], src_queue[i], nvdec[i], NULL);
     }
 
     /* ---- Link sources → streammux ---- */
     if (!use_file) {
         for (int i = 0; i < g_num_cameras; i++) {
-            /* v4l2src → capsfilter (MJPEG) → nvv4l2decoder (NVMM NV12 out) */
-            if (!gst_element_link_many(source[i], caps_f[i], nvdec[i], NULL)) {
+            /* v4l2src → capsfilter (MJPEG) → queue → nvv4l2decoder (NVMM NV12) */
+            if (!gst_element_link_many(source[i], caps_f[i], src_queue[i], nvdec[i], NULL)) {
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
