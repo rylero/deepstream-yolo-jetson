@@ -364,7 +364,6 @@ static void nt_init(int num_cameras)
 /* ------------------------------------------------------------------ */
 /* Pad probe (nvinfer src) — publishes per-source detections            */
 /* ------------------------------------------------------------------ */
-
 static GstPadProbeReturn inference_src_pad_buffer_probe(
     GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
@@ -378,22 +377,23 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
     int64_t now = now_us();
 
-    NvDsFrameMetaList *fl = batch_meta->frame_meta_list;
-    while (fl) {
+    /* Iterate through the frame list safely */
+    for (NvDsFrameMetaList *fl = batch_meta->frame_meta_list; fl != NULL; fl = fl->next) {
         NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
-        if (!fm) { fl = fl->next; continue; }
+        if (!fm) continue;
 
         int src = (int)fm->source_id;
-        if (src < 0 || src >= g_num_cameras) { fl = fl->next; continue; }
+        if (src < 0 || src >= g_num_cameras) continue;
 
-        /* Per-source FPS */
+        /* --- FPS Calculation --- */
         if (g_last_ts[src] > 0) {
             float inst = 1000000.0f / (float)(now - g_last_ts[src]);
             g_fps[src] = (g_fps[src] == 0.0f)
-                       ? inst : FPS_ALPHA * inst + (1.0f - FPS_ALPHA) * g_fps[src];
+                         ? inst : FPS_ALPHA * inst + (1.0f - FPS_ALPHA) * g_fps[src];
         }
         g_last_ts[src] = now;
 
+        /* --- Detection Logic --- */
         DetectionFrame det = {0};
         det.frame_number = (uint32_t)(fm->frame_num);
         det.timestamp_us = now;
@@ -403,8 +403,7 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         float fw = fm->source_frame_width  > 0 ? (float)fm->source_frame_width  : (float)FRAME_WIDTH;
         float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : (float)FRAME_HEIGHT;
 
-        NvDsObjectMetaList *ol = fm->obj_meta_list;
-        while (ol) {
+        for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL; ol = ol->next) {
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.75) {
                 Detection *d = &det.detections[det.num_detections++];
@@ -416,34 +415,36 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
                 d->height     = om->rect_params.height / fh;
                 strncpy(d->label, om->obj_label, sizeof(d->label) - 1);
             }
-            ol = ol->next;
         }
 
         NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
-        // /* FPS overlay: add display text before nvdsosd renders it */
+        /* --- FPS Overlay Logic --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
         if (dm) {
             dm->num_labels = 1;
             NvOSD_TextParams *tp = &dm->text_params[0];
-            tp->display_text = (char *)g_malloc(32);
-            snprintf(tp->display_text, 32, "cam%d  %.1f fps", src, g_fps[src]);
-            tp->x_offset = 8;
-            tp->y_offset = 8;
-            tp->font_params.font_name  = "Sans";
-            tp->font_params.font_size  = 14;
+            
+            /* DeepStream will g_free this automatically later */
+            tp->display_text = (char *)g_malloc0(32); 
+            snprintf(tp->display_text, 31, "cam%d  %.1f fps", src, g_fps[src]);
+            
+            tp->x_offset = 10;
+            tp->y_offset = 10;
+            tp->font_params.font_name  = (char *)"Sans";
+            tp->font_params.font_size  = 12;
             tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
             tp->set_bg_clr  = 1;
             tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
+            
+            /* Add to the FRAME meta so the Tiler can offset it correctly */
             nvds_add_display_meta_to_frame(fm, dm);
         }
 
         if (det.num_detections > 0)
-            printf("[DS] cam%d frame %u: %u detection(s)  %.1f fps\n",
-                   src, det.frame_number, det.num_detections, g_fps[src]);
-
-        fl = fl->next;
+            printf("[DS] cam%d frame %u: %u detections\n", src, det.frame_number, det.num_detections);
     }
+
     return GST_PAD_PROBE_OK;
 }
 
