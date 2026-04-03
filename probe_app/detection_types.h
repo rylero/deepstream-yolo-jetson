@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-#define MAX_DETECTIONS 64
+#define MAX_DETECTIONS 100
 #define FRAME_WIDTH    1280
 #define FRAME_HEIGHT   800
 

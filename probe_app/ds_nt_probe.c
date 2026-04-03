@@ -439,7 +439,7 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
 
         // Object Loop with Safety Limit
         int obj_count = 0;
-        for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 100; ol = ol->next) {
+        for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 150; ol = ol->next) {
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             
