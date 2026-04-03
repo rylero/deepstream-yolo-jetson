@@ -459,31 +459,6 @@ static void on_pad_added(GstElement *src, GstPad *new_pad, gpointer data)
     gst_object_unref(sinkpad);
 }
 
-/* nvv4l2decoder → nvstreammux (camera mode)
- * nvv4l2decoder has a DYNAMIC src pad — it is only created after the first
- * JPEG frame is decoded.  We must use pad-added instead of link_pads().   */
-typedef struct { GstElement *streammux; int camera_idx; } NvDecPadData;
-
-static void on_nvdec_pad_added(GstElement *nvdec, GstPad *new_pad, gpointer user_data)
-{
-    (void)nvdec;
-    NvDecPadData *d = (NvDecPadData *)user_data;
-    char pad_name[16];
-    snprintf(pad_name, sizeof(pad_name), "sink_%d", d->camera_idx);
-
-    GstPad *sinkpad = gst_element_request_pad_simple(d->streammux, pad_name);
-    if (!sinkpad) {
-        fprintf(stderr, "[Error] Could not get streammux %s\n", pad_name);
-        return;
-    }
-    GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
-    if (ret != GST_PAD_LINK_OK)
-        fprintf(stderr, "[Error] nvdec[%d] → streammux link failed: %d\n",
-                d->camera_idx, ret);
-    else
-        printf("[DS] nvdec[%d] → streammux %s linked\n", d->camera_idx, pad_name);
-    gst_object_unref(sinkpad);
-}
 
 /* ------------------------------------------------------------------ */
 /* Bus handler + signal                                                  */
@@ -604,6 +579,7 @@ int main(int argc, char *argv[])
     GstElement *caps_f   [MAX_CAMERAS] = {NULL};
     GstElement *src_queue[MAX_CAMERAS] = {NULL};
     GstElement *nvdec    [MAX_CAMERAS] = {NULL};
+    GstElement *vidconv  [MAX_CAMERAS] = {NULL};  /* nvv4l2decoder → nvvideoconvert → streammux */
 
     if (use_file) {
         source[0] = gst_element_factory_make("nvurisrcbin", "uri-source");
@@ -612,23 +588,23 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], q_name[32], dec_name[32];
+            char src_name[32], caps_name[32], q_name[32], dec_name[32], vc_name[32];
             snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",    i);
             snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
             snprintf(q_name,    sizeof(q_name),    "src-queue-%d",   i);
             snprintf(dec_name,  sizeof(dec_name),  "nvv4l2dec-%d",   i);
+            snprintf(vc_name,   sizeof(vc_name),   "src-vidconv-%d", i);
 
             source   [i] = gst_element_factory_make("v4l2src",       src_name);
             caps_f   [i] = gst_element_factory_make("capsfilter",     caps_name);
-            /* queue decouples v4l2src from nvv4l2decoder so RECONFIGURE events
-             * from the decoder don't propagate back to v4l2src and cause
-             * not-negotiated errors at runtime.                                */
             src_queue[i] = gst_element_factory_make("queue",          q_name);
-            /* nvv4l2decoder: Jetson hardware MJPEG decoder with mjpeg=TRUE to
-             * explicitly request MJPEG mode — outputs NVMM NV12 directly.     */
+            /* nvv4l2decoder: Jetson VIC hardware MJPEG decoder → NVMM NV12/NV12M */
             nvdec    [i] = gst_element_factory_make("nvv4l2decoder",  dec_name);
+            /* nvvideoconvert normalises NV12M → NV12 (NVMM) so streammux
+             * can accept the stream without sending a RECONFIGURE upstream. */
+            vidconv  [i] = gst_element_factory_make("nvvideoconvert", vc_name);
 
-            if (!source[i] || !caps_f[i] || !src_queue[i] || !nvdec[i]) {
+            if (!source[i] || !caps_f[i] || !src_queue[i] || !nvdec[i] || !vidconv[i]) {
                 fprintf(stderr, "[Error] Failed to create elements for camera %d\n", i);
                 return -1;
             }
@@ -637,11 +613,13 @@ int main(int argc, char *argv[])
             g_object_set(nvdec[i],  "mjpeg",  TRUE,             NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
-            /* Only constrain the format to MJPEG — let v4l2src negotiate
-             * resolution and framerate freely with the camera device.
-             * The camera picks its highest-preference MJPEG mode (120fps).
-             * nvstreammux scales every stream to FRAME_WIDTH×FRAME_HEIGHT. */
-            GstCaps *caps = gst_caps_from_string("image/jpeg");
+            /* Lock v4l2src to the camera's native MJPEG mode (1280×800 @ 120 fps).
+             * A fixed capsfilter prevents any downstream RECONFIGURE from causing
+             * v4l2src to renegotiate mid-stream (which would produce not-negotiated). */
+            GstCaps *caps = gst_caps_from_string(
+                "image/jpeg,width=" G_STRINGIFY(FRAME_WIDTH)
+                ",height=" G_STRINGIFY(FRAME_HEIGHT)
+                ",framerate=120/1");
             g_object_set(caps_f[i], "caps", caps, NULL);
             gst_caps_unref(caps);
         }
@@ -681,24 +659,27 @@ int main(int argc, char *argv[])
         gst_bin_add(GST_BIN(pipeline), source[0]);
     } else {
         for (int i = 0; i < g_num_cameras; i++)
-            gst_bin_add_many(GST_BIN(pipeline), source[i], caps_f[i], src_queue[i], nvdec[i], NULL);
+            gst_bin_add_many(GST_BIN(pipeline),
+                             source[i], caps_f[i], src_queue[i], nvdec[i], vidconv[i], NULL);
     }
 
     /* ---- Link sources → streammux ---- */
     if (!use_file) {
         for (int i = 0; i < g_num_cameras; i++) {
-            /* v4l2src → capsfilter (MJPEG) → queue → nvv4l2decoder (NVMM NV12) */
-            if (!gst_element_link_many(source[i], caps_f[i], src_queue[i], nvdec[i], NULL)) {
+            /* v4l2src → capsfilter(MJPEG 1280×800@120) → queue → nvv4l2decoder → nvvideoconvert */
+            if (!gst_element_link_many(source[i], caps_f[i], src_queue[i], nvdec[i], vidconv[i], NULL)) {
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
-            /* nvv4l2decoder has a DYNAMIC src pad (created on first decoded frame).
-             * Connect via pad-added signal; streammux sink pad is requested there. */
-            NvDecPadData *pad_data = g_new(NvDecPadData, 1);
-            pad_data->streammux  = streammux;
-            pad_data->camera_idx = i;
-            g_signal_connect(nvdec[i], "pad-added",
-                             G_CALLBACK(on_nvdec_pad_added), pad_data);
+            /* nvvideoconvert (static pad) → streammux sink_N
+             * nvv4l2decoder has a static src pad but outputs NV12M; nvvideoconvert
+             * normalises to NV12/NVMM so streammux accepts without RECONFIGURE. */
+            char pad_name[16];
+            snprintf(pad_name, sizeof(pad_name), "sink_%d", i);
+            if (!gst_element_link_pads(vidconv[i], "src", streammux, pad_name)) {
+                fprintf(stderr, "[Error] Failed to link vidconv[%d] → streammux\n", i);
+                return -1;
+            }
         }
     }
     /* file mode: nvurisrcbin → streammux via on_pad_added callback */
