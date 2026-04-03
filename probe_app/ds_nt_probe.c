@@ -380,7 +380,7 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
     NvDsFrameMetaList *fl = batch_meta->frame_meta_list;
     while (fl) {
-        NvDsFrameMeta *fm = (NvDgst_pad_add_probesFrameMeta *)fl->data;
+        NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
         if (!fm) { fl = fl->next; continue; }
 
         int src = (int)fm->source_id;
