@@ -436,9 +436,10 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 }
 
 /* ------------------------------------------------------------------ */
-/* Dynamic pad callback (nvurisrcbin → nvstreammux, file mode only)     */
+/* Dynamic pad callbacks                                                 */
 /* ------------------------------------------------------------------ */
 
+/* nvurisrcbin → nvstreammux (file mode only) */
 static void on_pad_added(GstElement *src, GstPad *new_pad, gpointer data)
 {
     (void)src;
@@ -455,6 +456,32 @@ static void on_pad_added(GstElement *src, GstPad *new_pad, gpointer data)
     if (!sinkpad) { fprintf(stderr, "[Error] Could not get streammux sink_0\n"); return; }
     if (gst_pad_link(new_pad, sinkpad) != GST_PAD_LINK_OK)
         fprintf(stderr, "[Error] Failed to link uri-source → streammux\n");
+    gst_object_unref(sinkpad);
+}
+
+/* nvv4l2decoder → nvstreammux (camera mode)
+ * nvv4l2decoder has a DYNAMIC src pad — it is only created after the first
+ * JPEG frame is decoded.  We must use pad-added instead of link_pads().   */
+typedef struct { GstElement *streammux; int camera_idx; } NvDecPadData;
+
+static void on_nvdec_pad_added(GstElement *nvdec, GstPad *new_pad, gpointer user_data)
+{
+    (void)nvdec;
+    NvDecPadData *d = (NvDecPadData *)user_data;
+    char pad_name[16];
+    snprintf(pad_name, sizeof(pad_name), "sink_%d", d->camera_idx);
+
+    GstPad *sinkpad = gst_element_request_pad_simple(d->streammux, pad_name);
+    if (!sinkpad) {
+        fprintf(stderr, "[Error] Could not get streammux %s\n", pad_name);
+        return;
+    }
+    GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
+    if (ret != GST_PAD_LINK_OK)
+        fprintf(stderr, "[Error] nvdec[%d] → streammux link failed: %d\n",
+                d->camera_idx, ret);
+    else
+        printf("[DS] nvdec[%d] → streammux %s linked\n", d->camera_idx, pad_name);
     gst_object_unref(sinkpad);
 }
 
@@ -665,15 +692,13 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
-            /* nvv4l2decoder src → streammux sink_N
-             * Use gst_element_link_pads so streammux's request pad is handled
-             * correctly (get_static_pad races with nvv4l2decoder pad creation). */
-            char pad_name[16];
-            snprintf(pad_name, sizeof(pad_name), "sink_%d", i);
-            if (!gst_element_link_pads(nvdec[i], "src", streammux, pad_name)) {
-                fprintf(stderr, "[Error] Failed to link nvdec[%d] → streammux\n", i);
-                return -1;
-            }
+            /* nvv4l2decoder has a DYNAMIC src pad (created on first decoded frame).
+             * Connect via pad-added signal; streammux sink pad is requested there. */
+            NvDecPadData *pad_data = g_new(NvDecPadData, 1);
+            pad_data->streammux  = streammux;
+            pad_data->camera_idx = i;
+            g_signal_connect(nvdec[i], "pad-added",
+                             G_CALLBACK(on_nvdec_pad_added), pad_data);
         }
     }
     /* file mode: nvurisrcbin → streammux via on_pad_added callback */
