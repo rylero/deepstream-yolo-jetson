@@ -444,7 +444,7 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             
             // Only process and display if confidence is above 0.95
-            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.95) {
+            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.6) {
                 
                 /* 1. Update NetworkTables Logic */
                 Detection *d = &det.detections[det.num_detections++];
