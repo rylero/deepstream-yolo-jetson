@@ -59,12 +59,11 @@
 #define CAPTURE_WIDTH  1280
 #define CAPTURE_HEIGHT 800
 
-/* Internal pipeline resolution fed to nvstreammux (and through to nvinfer).
- * Keeping this smaller than the capture size reduces CUDA memory pressure:
- * each NV12 frame in the batch is PIPE_WIDTH×PIPE_HEIGHT×1.5 bytes.
- * nvinfer still scales to 320×320 for the actual model input.              */
+/* Internal pipeline resolution fed to nvstreammux.
+ * Match the model's native input size (640×640) so nvinfer only needs to do
+ * a format conversion (NV12→RGB), never a resize — the simplest VIC op.    */
 #define PIPE_WIDTH  640
-#define PIPE_HEIGHT 400
+#define PIPE_HEIGHT 640
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
@@ -590,8 +589,9 @@ int main(int argc, char *argv[])
     GstElement *source   [MAX_CAMERAS] = {NULL};
     GstElement *caps_f   [MAX_CAMERAS] = {NULL};
     GstElement *src_queue[MAX_CAMERAS] = {NULL};
-    GstElement *nvdec    [MAX_CAMERAS] = {NULL};
-    GstElement *vidconv  [MAX_CAMERAS] = {NULL};  /* nvv4l2decoder → nvvideoconvert → streammux */
+    GstElement *jpegdec  [MAX_CAMERAS] = {NULL};
+    GstElement *cpuconv  [MAX_CAMERAS] = {NULL};  /* CPU videoconvert: I420→NV12        */
+    GstElement *vidconv  [MAX_CAMERAS] = {NULL};  /* nvvideoconvert: CPU NV12→NVMM NV12 */
 
     if (use_file) {
         source[0] = gst_element_factory_make("nvurisrcbin", "uri-source");
@@ -600,40 +600,39 @@ int main(int argc, char *argv[])
         g_signal_connect(source[0], "pad-added", G_CALLBACK(on_pad_added), streammux);
     } else {
         for (int i = 0; i < g_num_cameras; i++) {
-            char src_name[32], caps_name[32], q_name[32], dec_name[32], vc_name[32];
+            char src_name[32], caps_name[32], q_name[32], dec_name[32], cc_name[32], vc_name[32];
             snprintf(src_name,  sizeof(src_name),  "v4l2-src-%d",    i);
             snprintf(caps_name, sizeof(caps_name), "caps-filter-%d", i);
             snprintf(q_name,    sizeof(q_name),    "src-queue-%d",   i);
-            snprintf(dec_name,  sizeof(dec_name),  "nvv4l2dec-%d",   i);
-            snprintf(vc_name,   sizeof(vc_name),   "src-vidconv-%d", i);
+            snprintf(dec_name,  sizeof(dec_name),  "jpegdec-%d",     i);
+            snprintf(cc_name,   sizeof(cc_name),   "cpuconv-%d",     i);
+            snprintf(vc_name,   sizeof(vc_name),   "src-nvconv-%d",  i);
 
-            source   [i] = gst_element_factory_make("v4l2src",       src_name);
-            caps_f   [i] = gst_element_factory_make("capsfilter",     caps_name);
-            src_queue[i] = gst_element_factory_make("queue",          q_name);
-            /* nvv4l2decoder: Jetson VIC hardware MJPEG decoder → NVMM NV12/NV12M */
-            nvdec    [i] = gst_element_factory_make("nvv4l2decoder",  dec_name);
-            /* nvvideoconvert normalises NV12M → NV12 (NVMM) so streammux
-             * can accept the stream without sending a RECONFIGURE upstream. */
-            vidconv  [i] = gst_element_factory_make("nvvideoconvert", vc_name);
+            source   [i] = gst_element_factory_make("v4l2src",        src_name);
+            caps_f   [i] = gst_element_factory_make("capsfilter",      caps_name);
+            /* queue decouples v4l2src from the CPU decoder */
+            src_queue[i] = gst_element_factory_make("queue",           q_name);
+            /* CPU JPEG decoder — outputs I420/YUY2 in system memory.
+             * Using CPU path avoids NvBufSurfTransform (VIC) which fails when
+             * converting between NVMM memory types on this Jetson.             */
+            jpegdec  [i] = gst_element_factory_make("jpegdec",         dec_name);
+            /* CPU videoconvert normalises to NV12 before nvvideoconvert */
+            cpuconv  [i] = gst_element_factory_make("videoconvert",    cc_name);
+            /* nvvideoconvert: CPU NV12 → NVMM NV12.  Because the input is
+             * system memory (not NVMM), this uses a direct DMA copy instead
+             * of NvBufSurfTransform, which is the unsupported path.            */
+            vidconv  [i] = gst_element_factory_make("nvvideoconvert",  vc_name);
 
-            if (!source[i] || !caps_f[i] || !src_queue[i] || !nvdec[i] || !vidconv[i]) {
+            if (!source[i] || !caps_f[i] || !src_queue[i] ||
+                !jpegdec[i] || !cpuconv[i] || !vidconv[i]) {
                 fprintf(stderr, "[Error] Failed to create elements for camera %d\n", i);
                 return -1;
             }
 
             g_object_set(source[i], "device", camera_device[i], NULL);
-            g_object_set(nvdec[i],  "mjpeg",  TRUE,             NULL);
-            /* nvbuf-memory-type=2 → NVBUF_MEM_CUDA_DEVICE.
-             * nvv4l2decoder outputs VIC block-linear (NV12_BL) DMA buffers.
-             * Forcing CUDA device memory output here converts NV12_BL → NV12
-             * in CUDA address space so nvinfer's preprocessor never needs to
-             * call NvBufSurfTransform on VIC surfaces (which fails on Jetson). */
-            g_object_set(vidconv[i], "nvbuf-memory-type", 2, NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
-            /* Lock v4l2src to the camera's native MJPEG mode (1280×800 @ 120 fps).
-             * A fixed capsfilter prevents any downstream RECONFIGURE from causing
-             * v4l2src to renegotiate mid-stream (which would produce not-negotiated). */
+            /* Lock v4l2src to the camera's native MJPEG mode (1280×800 @ 120 fps). */
             GstCaps *caps = gst_caps_from_string(
                 "image/jpeg,width=" G_STRINGIFY(CAPTURE_WIDTH)
                 ",height=" G_STRINGIFY(CAPTURE_HEIGHT)
@@ -646,11 +645,10 @@ int main(int argc, char *argv[])
     /* ---- Configure shared elements ---- */
     g_object_set(streammux,
                  "batch-size",           g_num_cameras,
-                 "width",                PIPE_WIDTH,    /* nvstreammux scales capture→PIPE size */
+                 "width",                PIPE_WIDTH,
                  "height",               PIPE_HEIGHT,
                  "batched-push-timeout", 100000,
                  "live-source",          use_file ? FALSE : TRUE,
-                 "nvbuf-memory-type",    2,             /* NVBUF_MEM_CUDA_DEVICE: batch stays in CUDA */
                  NULL);
     g_object_set(infer,   "config-file-path", INFER_CONFIG, NULL);
     g_object_set(nvdsosd, "process-mode",     0,            NULL);
@@ -679,20 +677,20 @@ int main(int argc, char *argv[])
     } else {
         for (int i = 0; i < g_num_cameras; i++)
             gst_bin_add_many(GST_BIN(pipeline),
-                             source[i], caps_f[i], src_queue[i], nvdec[i], vidconv[i], NULL);
+                             source[i], caps_f[i], src_queue[i],
+                             jpegdec[i], cpuconv[i], vidconv[i], NULL);
     }
 
     /* ---- Link sources → streammux ---- */
     if (!use_file) {
         for (int i = 0; i < g_num_cameras; i++) {
-            /* v4l2src → capsfilter(MJPEG 1280×800@120) → queue → nvv4l2decoder → nvvideoconvert */
-            if (!gst_element_link_many(source[i], caps_f[i], src_queue[i], nvdec[i], vidconv[i], NULL)) {
+            /* v4l2src → capsfilter(MJPEG) → queue → jpegdec → videoconvert → nvvideoconvert */
+            if (!gst_element_link_many(source[i], caps_f[i], src_queue[i],
+                                       jpegdec[i], cpuconv[i], vidconv[i], NULL)) {
                 fprintf(stderr, "[Error] Failed to link camera %d source chain\n", i);
                 return -1;
             }
-            /* nvvideoconvert (static pad) → streammux sink_N
-             * nvv4l2decoder has a static src pad but outputs NV12M; nvvideoconvert
-             * normalises to NV12/NVMM so streammux accepts without RECONFIGURE. */
+            /* nvvideoconvert src → streammux sink_N */
             char pad_name[16];
             snprintf(pad_name, sizeof(pad_name), "sink_%d", i);
             if (!gst_element_link_pads(vidconv[i], "src", streammux, pad_name)) {
