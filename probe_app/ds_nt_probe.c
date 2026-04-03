@@ -367,31 +367,35 @@ static void nt_init(int num_cameras)
 static GstPadProbeReturn
 inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    (void)pad; (void)user_data;
+    // 1. ATOMIC LOCK: If the probe is already running on this thread/buffer, 
+    // exit immediately. This prevents recursive "spinning" loops.
+    static volatile int in_probe = 0;
+    if (__sync_lock_test_and_set(&in_probe, 1)) {
+        return GST_PAD_PROBE_OK; 
+    }
+
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (!buf) return GST_PAD_PROBE_OK;
+    if (!buf) {
+        __sync_lock_release(&in_probe);
+        return GST_PAD_PROBE_OK;
+    }
 
     NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(buf);
-    if (!batch_meta) return GST_PAD_PROBE_OK;
+    if (!batch_meta) {
+        __sync_lock_release(&in_probe);
+        return GST_PAD_PROBE_OK;
+    }
 
     int64_t now = now_us();
-    int frame_count = 0;
+    static int global_frame_count = 0;
+    global_frame_count++;
 
-    // --- FRAME META LOOP ---
+    // 2. STRICT ITERATION: We use num_frames_in_batch as the hard limit.
+    // This ignores any corrupted "next" pointers that point back to the start.
     NvDsFrameMetaList *fl = batch_meta->frame_meta_list;
-    while (fl != NULL) {
-        // [FIX] FORCE BREAK: Prevents 283% CPU by stopping the circular list
-        if (frame_count >= g_num_cameras) {
-            // We've processed all cameras in this batch; ignore the corrupted 'next'
-            break; 
-        }
-        frame_count++;
-
+    for (int i = 0; i < (int)batch_meta->num_frames_in_batch && fl != NULL; i++) {
         NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
-        if (!fm) {
-            fl = fl->next;
-            continue;
-        }
+        if (!fm) break;
 
         int src = (int)fm->source_id;
         if (src < 0 || src >= g_num_cameras) {
@@ -399,77 +403,73 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
             continue;
         }
 
-        // Calculate FPS
+        // Only print every 100 batches to save CPU cycles
+        if (global_frame_count % 100 == 0) {
+            printf("[DS] Processing Source %d | Batch Frame %d/%d\n", 
+                   src, i + 1, batch_meta->num_frames_in_batch);
+        }
+
+        /* --- FPS CALCULATION --- */
         if (g_last_ts[src] > 0) {
             float inst = 1000000.0f / (float)(now - g_last_ts[src]);
             g_fps[src] = (g_fps[src] == 0.0f) ? inst : (FPS_ALPHA * inst + (1.0f - FPS_ALPHA) * g_fps[src]);
         }
         g_last_ts[src] = now;
 
-        // Populate NT Detection Data
+        /* --- DETECTION DATA (NetworkTables) --- */
         DetectionFrame det = {0};
         det.frame_number = (uint32_t)fm->frame_num;
         det.timestamp_us = (uint64_t)now;
         det.fps          = g_fps[src];
         det.source_id    = (uint32_t)src;
-        det.num_detections = 0;
 
-        float fw = fm->source_frame_width  > 0 ? (float)fm->source_frame_width  : (float)FRAME_WIDTH;
-        float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : (float)FRAME_HEIGHT;
+        float fw = fm->source_frame_width  > 0 ? (float)fm->source_frame_width  : 1280.0f;
+        float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : 800.0f;
 
-        // --- OBJECT META LOOP ---
+        // Object Loop with Safety Limit
         int obj_count = 0;
-        NvDsObjectMetaList *ol = fm->obj_meta_list;
-        while (ol != NULL) {
-            // [FIX] Safety check for object list corruption
-            if (obj_count++ > 500) break; 
-
+        for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 100; ol = ol->next) {
+            obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
-            if (om && det.num_detections < MAX_DETECTIONS) {
-                // Example filter: only send high confidence
-                if (om->confidence > 0.60) {
-                    Detection *d = &det.detections[det.num_detections++];
-                    d->class_id   = om->class_id;
-                    d->confidence = om->confidence;
-                    d->left       = om->rect_params.left   / fw;
-                    d->top        = om->rect_params.top    / fh;
-                    d->width      = om->rect_params.width  / fw;
-                    d->height     = om->rect_params.height / fh;
-                    // Safe string copy
-                    g_strlcpy(d->label, om->obj_label, sizeof(d->label));
-                }
+            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.70) {
+                Detection *d = &det.detections[det.num_detections++];
+                d->class_id   = om->class_id;
+                d->confidence = om->confidence;
+                d->left       = om->rect_params.left   / fw;
+                d->top        = om->rect_params.top    / fh;
+                d->width      = om->rect_params.width  / fw;
+                d->height     = om->rect_params.height / fh;
+                g_strlcpy(d->label, om->obj_label, sizeof(d->label));
             }
-            ol = ol->next;
         }
 
-        // Send to NetworkTables (User-defined function)
+        // Send to RoboRIO (Commented out for initial spin test)
         // NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
-        // --- OSD OVERLAY ---
+        /* --- OSD OVERLAY --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
         if (dm) {
             dm->num_labels = 1;
             NvOSD_TextParams *tp = &dm->text_params[0];
-            
-            // Allocation for text
             tp->display_text = (char *)g_malloc0(64);
-            snprintf(tp->display_text, 63, "Cam %d | %.1f FPS", src, g_fps[src]);
-            
-            tp->x_offset = 20;
-            tp->y_offset = 20;
-            tp->font_params.font_name = (char *)"Serif";
-            tp->font_params.font_size = 14;
+            snprintf(tp->display_text, 63, "CAM %d | %.1f FPS", src, g_fps[src]);
+            tp->x_offset = 20; tp->y_offset = 20;
+            tp->font_params.font_name = (char *)"Sans";
+            tp->font_params.font_size = 12;
             tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
             tp->set_bg_clr = 1;
             tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5};
-
             nvds_add_display_meta_to_frame(fm, dm);
         }
 
-        // Iterate to next frame
-        fl = fl->next;
+        // Move to next frame in list
+        NvDsFrameMetaList *next_node = fl->next;
+        if (next_node == fl) break; // Final check for circular self-reference
+        fl = next_node;
     }
 
+    // 3. RELEASE LOCK: Allow the next buffer to be processed
+    __sync_lock_release(&in_probe);
     return GST_PAD_PROBE_OK;
 }
 
