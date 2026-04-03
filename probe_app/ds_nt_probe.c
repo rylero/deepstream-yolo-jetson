@@ -59,11 +59,12 @@
 #define CAPTURE_WIDTH  1280
 #define CAPTURE_HEIGHT 800
 
-/* Internal pipeline resolution fed to nvstreammux.
- * Match the model's native input size (640×640) so nvinfer only needs to do
- * a format conversion (NV12→RGB), never a resize — the simplest VIC op.    */
+/* Internal pipeline resolution fed to nvstreammux (per-stream).
+ * 640×400 maintains the camera's native 16:10 (1280×800) aspect ratio.
+ * nvinfer's maintain-aspect-ratio=1 + symmetric-padding=1 pads the 640×400
+ * input to 640×640 for the model with black bars (120 px top+bottom).       */
 #define PIPE_WIDTH  640
-#define PIPE_HEIGHT 640
+#define PIPE_HEIGHT 400
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
