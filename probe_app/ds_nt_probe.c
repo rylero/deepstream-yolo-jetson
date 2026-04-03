@@ -444,10 +444,9 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             
-            // Only process and display if confidence is above 0.95
             if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.95) {
                 
-                /* 1. Update NetworkTables / Logic Data */
+                /* 1. Update NetworkTables Logic (Your existing code) */
                 Detection *d = &det.detections[det.num_detections++];
                 d->class_id   = om->class_id;
                 d->confidence = om->confidence;
@@ -457,22 +456,24 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
                 d->height     = om->rect_params.height / fh;
                 g_strlcpy(d->label, om->obj_label, sizeof(d->label));
 
-                /* 2. Update the On-Screen Label with Confidence */
-                // DeepStream allocates a default string; we replace it with our own
-                // Format: "fuel 97%"
+                /* 2. FORCE the OSD to show our custom text */
                 char new_label[64];
                 snprintf(new_label, sizeof(new_label), "%s %.0f%%", 
                          om->obj_label, om->confidence * 100.0);
 
-                // Free the old text if it exists to avoid a memory leak, then assign new
-                if (om->text_params.display_text) {
-                    g_free(om->text_params.display_text);
-                }
+                if (om->text_params.display_text) g_free(om->text_params.display_text);
                 om->text_params.display_text = g_strdup(new_label);
 
-                // Optional: Force the background color so it's readable
+                // --- CRITICAL RENDERING FLAGS ---
+                om->text_params.set_show_text = 1; // Tells OSD to actually draw it
+                om->text_params.font_params.font_size = 12;
+                om->text_params.font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
                 om->text_params.set_bg_clr = 1;
-                om->text_params.text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5}; 
+                om->text_params.text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5};
+            } else if (om) {
+                // HIDE labels for anything below 0.95 confidence
+                om->text_params.set_show_text = 0;
+                om->rect_params.border_width = 0; // Also hide the box
             }
         }
 
