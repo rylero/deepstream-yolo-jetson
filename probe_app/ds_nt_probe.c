@@ -54,6 +54,18 @@
 #define VIDEO_DEVICE_FMT "/dev/video%d"
 #define MAX_CAMERAS    4
 
+/* Camera capture resolution — must match a MJPEG mode the camera reports.
+ * Used only in the v4l2src capsfilter.                                     */
+#define CAPTURE_WIDTH  1280
+#define CAPTURE_HEIGHT 800
+
+/* Internal pipeline resolution fed to nvstreammux (and through to nvinfer).
+ * Keeping this smaller than the capture size reduces CUDA memory pressure:
+ * each NV12 frame in the batch is PIPE_WIDTH×PIPE_HEIGHT×1.5 bytes.
+ * nvinfer still scales to 320×320 for the actual model input.              */
+#define PIPE_WIDTH  640
+#define PIPE_HEIGHT 400
+
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
 /* ------------------------------------------------------------------ */
@@ -548,8 +560,8 @@ int main(int argc, char *argv[])
     /* ---- Tiler layout: 1 row × N columns ---- */
     int tiler_cols = g_num_cameras;
     int tiler_rows = 1;
-    int tiled_w    = FRAME_WIDTH * g_num_cameras;  /* total output width  */
-    int tiled_h    = FRAME_HEIGHT;                 /* total output height */
+    int tiled_w    = PIPE_WIDTH * g_num_cameras;  /* total output width  */
+    int tiled_h    = PIPE_HEIGHT;                 /* total output height */
 
     /* ---- Shared pipeline elements ---- */
     GstElement *pipeline    = gst_pipeline_new("ds-nt-pipeline");
@@ -617,8 +629,8 @@ int main(int argc, char *argv[])
              * A fixed capsfilter prevents any downstream RECONFIGURE from causing
              * v4l2src to renegotiate mid-stream (which would produce not-negotiated). */
             GstCaps *caps = gst_caps_from_string(
-                "image/jpeg,width=" G_STRINGIFY(FRAME_WIDTH)
-                ",height=" G_STRINGIFY(FRAME_HEIGHT)
+                "image/jpeg,width=" G_STRINGIFY(CAPTURE_WIDTH)
+                ",height=" G_STRINGIFY(CAPTURE_HEIGHT)
                 ",framerate=120/1");
             g_object_set(caps_f[i], "caps", caps, NULL);
             gst_caps_unref(caps);
@@ -628,8 +640,8 @@ int main(int argc, char *argv[])
     /* ---- Configure shared elements ---- */
     g_object_set(streammux,
                  "batch-size",           g_num_cameras,
-                 "width",                FRAME_WIDTH,   /* per-stream; tiler scales to tiled_w */
-                 "height",               FRAME_HEIGHT,
+                 "width",                PIPE_WIDTH,    /* nvstreammux scales capture→PIPE size */
+                 "height",               PIPE_HEIGHT,
                  "batched-push-timeout", 100000,
                  "live-source",          use_file ? FALSE : TRUE,
                  NULL);

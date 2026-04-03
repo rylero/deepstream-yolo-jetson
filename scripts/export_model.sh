@@ -12,8 +12,8 @@ set -euo pipefail
 
 MODEL_DIR=/opt/deepstream/models
 CUSTOM_PT="$MODEL_DIR/custom_model.pt"
-ONNX="$MODEL_DIR/custom_yolo11n.onnx"
-ENGINE="$MODEL_DIR/custom_yolo11n_b1_gpu0_fp16.engine"
+ONNX="$MODEL_DIR/custom_yolo11n_640.onnx"
+ENGINE="$MODEL_DIR/custom_yolo11n_640_b1_gpu0_fp16.engine"
 DEEPSTREAM_YOLO=/opt/deepstream/DeepStream-Yolo
 ULTRALYTICS_DIR=/opt/ultralytics
 SO="$DEEPSTREAM_YOLO/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so"
@@ -60,7 +60,7 @@ if [ ! -f "$ONNX" ]; then
     echo "[export] Using $EXPORT_SCRIPT"
     # -s 320: 320×320 inference input — 4× smaller intermediate tensors than 640,
     # keeping TRT tactic memory within Jetson's ~26 MB CUDA budget.
-    python3 "$EXPORT_SCRIPT" -w custom_model.pt -s 320 --simplify
+    python3 "$EXPORT_SCRIPT" -w custom_model.pt -s 640 --simplify
 
     cp custom_model.onnx "$ONNX"
     if [ -f "labels.txt" ]; then
