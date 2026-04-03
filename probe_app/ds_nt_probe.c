@@ -407,6 +407,11 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         while (ol) {
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             if (om && det.num_detections < MAX_DETECTIONS) {
+
+                if (om->confidence < 0.6) {
+                    continue;
+                }
+
                 Detection *d = &det.detections[det.num_detections++];
                 d->class_id   = om->class_id;
                 d->confidence = om->confidence;
