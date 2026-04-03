@@ -368,6 +368,8 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
     GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     (void)pad; (void)user_data;
+    static int probe_count = 0;
+    printf("--- Probe Start %d ---\n", probe_count++);
 
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!buf) return GST_PAD_PROBE_OK;
@@ -379,6 +381,7 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
     /* Iterate through the frame list safely */
     for (NvDsFrameMetaList *fl = batch_meta->frame_meta_list; fl != NULL; fl = fl->next) {
+        printf("  Processing frame for src %d\n", src);
         NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
         if (!fm) continue;
 
