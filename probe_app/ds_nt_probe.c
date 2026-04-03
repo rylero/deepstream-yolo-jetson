@@ -431,7 +431,7 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
         for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 100; ol = ol->next) {
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
-            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.70) {
+            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.80) {
                 Detection *d = &det.detections[det.num_detections++];
                 d->class_id   = om->class_id;
                 d->confidence = om->confidence;
