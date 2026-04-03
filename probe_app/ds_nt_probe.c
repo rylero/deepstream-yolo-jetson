@@ -64,7 +64,7 @@
  * nvinfer's maintain-aspect-ratio=1 + symmetric-padding=1 pads the 640×400
  * input to 640×640 for the model with black bars (120 px top+bottom).       */
 #define PIPE_WIDTH  640
-#define PIPE_HEIGHT 400
+#define PIPE_HEIGHT 640
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
