@@ -125,7 +125,6 @@ static GstFlowReturn on_new_jpeg_sample(GstElement *sink, gpointer user_data)
     gst_sample_unref(sample);
     return GST_FLOW_OK;
 }
-
 /* ---- v4l2 camera control ---- */
 
 static void v4l2_set_ctrl(int cam_idx, uint32_t ctrl_id, int value)
@@ -135,6 +134,7 @@ static void v4l2_set_ctrl(int cam_idx, uint32_t ctrl_id, int value)
     for (int i = start; i < end; i++) {
         int fd = open(g_cam_paths[i], O_RDWR | O_NONBLOCK);
         if (fd < 0) { fprintf(stderr, "[v4l2] open %s: %m\n", g_cam_paths[i]); continue; }
+        
         struct v4l2_control ctrl = { .id = ctrl_id, .value = value };
         if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0)
             fprintf(stderr, "[v4l2] VIDIOC_S_CTRL id=%u val=%d on %s: %m\n",
@@ -151,9 +151,9 @@ static int query_param_int(const char *qs, const char *name, int def)
     return p ? atoi(p + strlen(needle)) : def;
 }
 
-/* ---- Dynamic HTML page (built once at startup) ---- */
+/* ---- Dynamic HTML page (Updated with White Balance) ---- */
 
-static char  g_html_page[8192];
+static char  g_html_page[10240]; // Increased size for extra HTML
 static size_t g_html_len = 0;
 
 static void build_html(int num_cameras)
@@ -173,7 +173,7 @@ static void build_html(int num_cameras)
         "img{max-width:100%%;border:2px solid #444;border-radius:4px;}"
         "h2{margin:0;font-size:1.2rem;}"
         ".panel{display:flex;flex-wrap:wrap;gap:20px;background:#1e1e1e;"
-        "padding:14px 20px;border-radius:6px;width:100%%;max-width:900px;box-sizing:border-box;}"
+        "padding:14px 20px;border-radius:6px;width:100%%;max-width:1000px;box-sizing:border-box;}"
         ".grp{display:flex;flex-direction:column;gap:6px;min-width:180px;}"
         ".grp label{font-size:.82rem;color:#aaa;}"
         "input[type=range]{width:170px;accent-color:#4af;}"
@@ -190,22 +190,29 @@ static void build_html(int num_cameras)
             "<input type='range' id='b' min='0' max='255' value='128'></div>"
           "<div class='grp'>"
             "<label><input type='checkbox' id='ae' checked> Auto Exposure</label>"
-            "<label>Exposure (1/10 ms): <b id='ev'>300</b></label>"
+            "<label>Exposure: <b id='ev'>300</b></label>"
             "<input type='range' id='e' min='1' max='2000' value='300' disabled></div>"
+          "<div class='grp'>"
+            "<label><input type='checkbox' id='awb' checked> Auto White Balance</label>"
+            "<label>Temp (K): <b id='wbv'>4500</b></label>"
+            "<input type='range' id='wb' min='2000' max='8000' value='4500' disabled></div>"
         "</div>"
         "<script>"
         "const NC=%d;"
         "const camTargets=()=>{const v=document.getElementById('cam').value;"
           "return v=='-1'?[...Array(NC).keys()]:[parseInt(v)];};"
         "const post=(p)=>camTargets().forEach(c=>fetch('/set?cam='+c+'&'+p));"
+        
         "const b=document.getElementById('b');"
-        "b.oninput=()=>{document.getElementById('bv').textContent=b.value;"
-          "post('brightness='+b.value);};"
-        "const ae=document.getElementById('ae'),e=document.getElementById('e');"
-        "ae.onchange=()=>{e.disabled=ae.checked;"
-          "post('auto_exposure='+(ae.checked?3:1));};"
-        "e.oninput=()=>{document.getElementById('ev').textContent=e.value;"
-          "post('exposure='+e.value);};"
+        "b.oninput=()=>{document.getElementById('bv').textContent=b.value; post('brightness='+b.value);};"
+        
+        "const ae=document.getElementById('ae'), e=document.getElementById('e');"
+        "ae.onchange=()=>{e.disabled=ae.checked; post('auto_exposure='+(ae.checked?3:1));};"
+        "e.oninput=()=>{document.getElementById('ev').textContent=e.value; post('exposure='+e.value);};"
+        
+        "const awb=document.getElementById('awb'), wb=document.getElementById('wb');"
+        "awb.onchange=()=>{wb.disabled=awb.checked; post('auto_wb='+(awb.checked?1:0));};"
+        "wb.oninput=()=>{document.getElementById('wbv').textContent=wb.value; post('wb_temp='+wb.value);};"
         "</script>"
         "</body></html>",
         opts, num_cameras);
@@ -226,7 +233,7 @@ static void *handle_client(void *arg)
     int fd = *(int *)arg;
     g_free(arg);
 
-    char req[512] = {0};
+    char req[1024] = {0}; // Increased for complex query strings
     recv(fd, req, sizeof(req) - 1, 0);
 
     if (strstr(req, "GET / ") || strstr(req, "GET /\r")) {
@@ -238,22 +245,26 @@ static void *handle_client(void *arg)
         send_all(fd, g_html_page, g_html_len);
 
     } else if (strstr(req, "GET /set?")) {
-        /* Camera control: /set?cam=N&brightness=X  or  &auto_exposure=3  or  &exposure=Y */
         char *qs = strstr(req, "/set?") + 5;
         int cam  = query_param_int(qs, "cam", -1);
 
+        // Brightness
         if (strstr(qs, "brightness="))
-            v4l2_set_ctrl(cam, V4L2_CID_BRIGHTNESS,
-                          query_param_int(qs, "brightness", 128));
+            v4l2_set_ctrl(cam, V4L2_CID_BRIGHTNESS, query_param_int(qs, "brightness", 128));
+        
+        // Exposure Logic
         if (strstr(qs, "auto_exposure="))
-            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_AUTO,
-                          query_param_int(qs, "auto_exposure", 3));
+            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_AUTO, query_param_int(qs, "auto_exposure", 3));
         if (strstr(qs, "exposure="))
-            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_ABSOLUTE,
-                          query_param_int(qs, "exposure", 300));
+            v4l2_set_ctrl(cam, V4L2_CID_EXPOSURE_ABSOLUTE, query_param_int(qs, "exposure", 300));
+            
+        // White Balance Logic
+        if (strstr(qs, "auto_wb="))
+            v4l2_set_ctrl(cam, V4L2_CID_AUTO_WHITE_BALANCE, query_param_int(qs, "auto_wb", 1));
+        if (strstr(qs, "wb_temp="))
+            v4l2_set_ctrl(cam, V4L2_CID_WHITE_BALANCE_TEMPERATURE, query_param_int(qs, "wb_temp", 4500));
 
-        send_all(fd,
-            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", 47);
+        send_all(fd, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", 47);
 
     } else if (strstr(req, "GET /stream")) {
         const char *hdr =
@@ -266,26 +277,26 @@ static void *handle_client(void *arg)
             pthread_mutex_lock(&g_jpeg_mutex);
             while (!g_jpeg_ready)
                 pthread_cond_wait(&g_jpeg_cond, &g_jpeg_mutex);
+            
             guint8 *frame = (guint8 *)g_memdup2(g_jpeg.data, g_jpeg.size);
-            gsize   fsz   = g_jpeg.size;
-            g_jpeg_ready  = FALSE;
+            gsize fsz = g_jpeg.size;
+            g_jpeg_ready = FALSE;
             pthread_mutex_unlock(&g_jpeg_mutex);
 
             char part[256];
             int plen = snprintf(part, sizeof(part),
                 "--" MJPEG_BOUNDARY "\r\nContent-Type: image/jpeg\r\n"
                 "Content-Length: %zu\r\n\r\n", fsz);
-            if (send(fd, part,  (size_t)plen, MSG_NOSIGNAL) <= 0 ||
-                send(fd, frame, fsz,           MSG_NOSIGNAL) <= 0 ||
-                send(fd, "\r\n", 2,            MSG_NOSIGNAL) <= 0) {
+            
+            if (send(fd, part, (size_t)plen, MSG_NOSIGNAL) <= 0 ||
+                send(fd, frame, fsz, MSG_NOSIGNAL) <= 0 ||
+                send(fd, "\r\n", 2, MSG_NOSIGNAL) <= 0) {
                 g_free(frame); break;
             }
             g_free(frame);
         }
     } else {
-        send_all(fd,
-            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            72);
+        send_all(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", 72);
     }
     close(fd);
     return NULL;
@@ -309,7 +320,7 @@ static void *http_server_thread(void *arg)
         perror("[HTTP] bind"); close(srv); return NULL;
     }
     listen(srv, 10);
-    printf("[HTTP] Tiled MJPEG stream →  http://<jetson-ip>:%d/\n", MJPEG_PORT);
+    printf("[HTTP] Tiled MJPEG stream -> http://<jetson-ip>:%d/\n", MJPEG_PORT);
 
     while (1) {
         int client = accept(srv, NULL, NULL);
@@ -427,11 +438,16 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
         float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : 800.0f;
 
         // Object Loop with Safety Limit
+        // Object Loop with Safety Limit
         int obj_count = 0;
         for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 100; ol = ol->next) {
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
-            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.80) {
+            
+            // Only process and display if confidence is above 0.95
+            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.95) {
+                
+                /* 1. Update NetworkTables / Logic Data */
                 Detection *d = &det.detections[det.num_detections++];
                 d->class_id   = om->class_id;
                 d->confidence = om->confidence;
@@ -440,11 +456,28 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
                 d->width      = om->rect_params.width  / fw;
                 d->height     = om->rect_params.height / fh;
                 g_strlcpy(d->label, om->obj_label, sizeof(d->label));
+
+                /* 2. Update the On-Screen Label with Confidence */
+                // DeepStream allocates a default string; we replace it with our own
+                // Format: "fuel 97%"
+                char new_label[64];
+                snprintf(new_label, sizeof(new_label), "%s %.0f%%", 
+                         om->obj_label, om->confidence * 100.0);
+
+                // Free the old text if it exists to avoid a memory leak, then assign new
+                if (om->text_params.display_text) {
+                    g_free(om->text_params.display_text);
+                }
+                om->text_params.display_text = g_strdup(new_label);
+
+                // Optional: Force the background color so it's readable
+                om->text_params.set_bg_clr = 1;
+                om->text_params.text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5}; 
             }
         }
 
         // Send to RoboRIO (Commented out for initial spin test)
-        // NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
+        NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
         /* --- OSD OVERLAY --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
