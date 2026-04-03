@@ -420,26 +420,26 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
         /* --- FPS Overlay Logic --- */
-        NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
-        if (dm) {
-            dm->num_labels = 1;
-            NvOSD_TextParams *tp = &dm->text_params[0];
+        // NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
+        // if (dm) {
+        //     dm->num_labels = 1;
+        //     NvOSD_TextParams *tp = &dm->text_params[0];
             
-            /* DeepStream will g_free this automatically later */
-            tp->display_text = (char *)g_malloc0(32); 
-            snprintf(tp->display_text, 31, "cam%d  %.1f fps", src, g_fps[src]);
+        //     /* DeepStream will g_free this automatically later */
+        //     tp->display_text = (char *)g_malloc0(32); 
+        //     snprintf(tp->display_text, 31, "cam%d  %.1f fps", src, g_fps[src]);
             
-            tp->x_offset = 10;
-            tp->y_offset = 10;
-            tp->font_params.font_name  = (char *)"Sans";
-            tp->font_params.font_size  = 12;
-            tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
-            tp->set_bg_clr  = 1;
-            tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
+        //     tp->x_offset = 10;
+        //     tp->y_offset = 10;
+        //     tp->font_params.font_name  = (char *)"Sans";
+        //     tp->font_params.font_size  = 12;
+        //     tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
+        //     tp->set_bg_clr  = 1;
+        //     tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
             
-            /* Add to the FRAME meta so the Tiler can offset it correctly */
-            nvds_add_display_meta_to_frame(fm, dm);
-        }
+        //     /* Add to the FRAME meta so the Tiler can offset it correctly */
+        //     nvds_add_display_meta_to_frame(fm, dm);
+        // }
 
         if (det.num_detections > 0)
             printf("[DS] cam%d frame %u: %u detections\n", src, det.frame_number, det.num_detections);
