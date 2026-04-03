@@ -623,6 +623,12 @@ int main(int argc, char *argv[])
 
             g_object_set(source[i], "device", camera_device[i], NULL);
             g_object_set(nvdec[i],  "mjpeg",  TRUE,             NULL);
+            /* nvbuf-memory-type=2 → NVBUF_MEM_CUDA_DEVICE.
+             * nvv4l2decoder outputs VIC block-linear (NV12_BL) DMA buffers.
+             * Forcing CUDA device memory output here converts NV12_BL → NV12
+             * in CUDA address space so nvinfer's preprocessor never needs to
+             * call NvBufSurfTransform on VIC surfaces (which fails on Jetson). */
+            g_object_set(vidconv[i], "nvbuf-memory-type", 2, NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
             /* Lock v4l2src to the camera's native MJPEG mode (1280×800 @ 120 fps).
@@ -644,6 +650,7 @@ int main(int argc, char *argv[])
                  "height",               PIPE_HEIGHT,
                  "batched-push-timeout", 100000,
                  "live-source",          use_file ? FALSE : TRUE,
+                 "nvbuf-memory-type",    2,             /* NVBUF_MEM_CUDA_DEVICE: batch stays in CUDA */
                  NULL);
     g_object_set(infer,   "config-file-path", INFER_CONFIG, NULL);
     g_object_set(nvdsosd, "process-mode",     0,            NULL);
