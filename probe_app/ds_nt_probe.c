@@ -64,7 +64,7 @@
  * nvinfer's maintain-aspect-ratio=1 + symmetric-padding=1 pads the 640×400
  * input to 640×640 for the model with black bars (120 px top+bottom).       */
 #define PIPE_WIDTH  640
-#define PIPE_HEIGHT 640
+#define PIPE_HEIGHT 400
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
@@ -380,7 +380,7 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
     NvDsFrameMetaList *fl = batch_meta->frame_meta_list;
     while (fl) {
-        NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
+        NvDsFrameMeta *fm = (NvDgst_pad_add_probesFrameMeta *)fl->data;
         if (!fm) { fl = fl->next; continue; }
 
         int src = (int)fm->source_id;
@@ -422,56 +422,19 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
         // /* FPS overlay: add display text before nvdsosd renders it */
-        // NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
-        // if (dm) {
-        //     dm->num_labels = 1;
-        //     NvOSD_TextParams *tp = &dm->text_params[0];
-        //     tp->display_text = (char *)g_malloc(32);
-        //     snprintf(tp->display_text, 32, "cam%d  %.1f fps", src, g_fps[src]);
-        //     tp->x_offset = 8;
-        //     tp->y_offset = 8;
-        //     tp->font_params.font_name  = "Sans";
-        //     tp->font_params.font_size  = 14;
-        //     tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
-        //     tp->set_bg_clr  = 1;
-        //     tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
-        //     nvds_add_display_meta_to_frame(fm, dm);
-        // }
-
-        /* --- FPS overlay: Fixed Logic --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
         if (dm) {
-            // It is safer to reset num_labels and other counts to 0 
-            // as pools can sometimes return "dirty" objects
-            dm->num_labels = 0;
-            dm->num_rects = 0;
-            dm->num_lines = 0;
-
-            NvOSD_TextParams *tp = &dm->text_params[0];
-            
-            // Allocate and set text
-            tp->display_text = (char *)g_malloc0(32);
-            snprintf(tp->display_text, 31, "cam%d  %.1f fps", src, g_fps[src]);
-            
-            // Positioning
-            tp->x_offset = 10;
-            tp->y_offset = 10;
-            
-            // Font settings
-            tp->font_params.font_name = (char*)"Serif";
-            tp->font_params.font_size = 12;
-            tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0}; // White
-            
-            // Background
-            tp->set_bg_clr = 1;
-            tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5}; // Semi-transparent black
-            
             dm->num_labels = 1;
-
-            /* CRITICAL: Add this meta ONLY to the current frame meta 'fm'.
-               The OSD element will then render this meta onto the specific 
-               tile associated with this frame.
-            */
+            NvOSD_TextParams *tp = &dm->text_params[0];
+            tp->display_text = (char *)g_malloc(32);
+            snprintf(tp->display_text, 32, "cam%d  %.1f fps", src, g_fps[src]);
+            tp->x_offset = 8;
+            tp->y_offset = 8;
+            tp->font_params.font_name  = "Sans";
+            tp->font_params.font_size  = 14;
+            tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
+            tp->set_bg_clr  = 1;
+            tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
             nvds_add_display_meta_to_frame(fm, dm);
         }
 
