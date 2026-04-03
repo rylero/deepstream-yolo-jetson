@@ -438,15 +438,15 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
         float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : 800.0f;
 
         // Object Loop with Safety Limit
-        // Object Loop with Safety Limit
         int obj_count = 0;
         for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 100; ol = ol->next) {
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             
+            // Only process and display if confidence is above 0.95
             if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.95) {
                 
-                /* 1. Update NetworkTables Logic (Your existing code) */
+                /* 1. Update NetworkTables Logic */
                 Detection *d = &det.detections[det.num_detections++];
                 d->class_id   = om->class_id;
                 d->confidence = om->confidence;
@@ -456,24 +456,35 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
                 d->height     = om->rect_params.height / fh;
                 g_strlcpy(d->label, om->obj_label, sizeof(d->label));
 
-                /* 2. FORCE the OSD to show our custom text */
+                /* 2. Update the On-Screen Label with Confidence */
                 char new_label[64];
                 snprintf(new_label, sizeof(new_label), "%s %.0f%%", 
                          om->obj_label, om->confidence * 100.0);
 
-                if (om->text_params.display_text) g_free(om->text_params.display_text);
+                // Re-allocate the display text
+                if (om->text_params.display_text) {
+                    g_free(om->text_params.display_text);
+                }
                 om->text_params.display_text = g_strdup(new_label);
 
-                // --- CRITICAL RENDERING FLAGS ---
-                om->text_params.set_show_text = 1; // Tells OSD to actually draw it
+                // Set styles (standard fields that definitely exist)
                 om->text_params.font_params.font_size = 12;
                 om->text_params.font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
                 om->text_params.set_bg_clr = 1;
                 om->text_params.text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5};
+
+                // Ensure the border is visible
+                om->rect_params.border_width = 3;
+                
             } else if (om) {
-                // HIDE labels for anything below 0.95 confidence
-                om->text_params.set_show_text = 0;
-                om->rect_params.border_width = 0; // Also hide the box
+                /* 3. HIDE low confidence objects */
+                // To hide the text in the SDK, we free it and set to NULL
+                if (om->text_params.display_text) {
+                    g_free(om->text_params.display_text);
+                    om->text_params.display_text = NULL;
+                }
+                // To hide the box, set border width to 0
+                om->rect_params.border_width = 0;
             }
         }
 
