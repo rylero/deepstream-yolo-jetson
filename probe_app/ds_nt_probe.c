@@ -692,11 +692,14 @@ int main(int argc, char *argv[])
     g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_jpeg_sample), NULL);
 
     /* ---- Add all elements to pipeline bin ---- */
+    /* Correct Order: Infer -> Convert -> Tiler -> OSD */
     gst_bin_add_many(GST_BIN(pipeline),
-                     streammux, infer, vidconv_osd, nvdsosd, tiler, tee,
-                     queue_inf, sink,
-                     queue_web, nv2cpu, vcpucpu, jpegenc, appsink,
-                     NULL);
+                    streammux, infer, 
+                    vidconv_osd, tiler, // Tiler comes BEFORE OSD
+                    nvdsosd, tee, 
+                    queue_inf, sink,
+                    queue_web, nv2cpu, vcpucpu, jpegenc, appsink,
+                    NULL);
 
     if (use_file) {
         gst_bin_add(GST_BIN(pipeline), source[0]);
