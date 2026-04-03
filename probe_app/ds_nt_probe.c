@@ -368,9 +368,6 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
     GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     (void)pad; (void)user_data;
-    static int probe_count = 0;
-    printf("--- Probe Start %d ---\n", probe_count++);
-
     GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
     if (!buf) return GST_PAD_PROBE_OK;
 
@@ -378,14 +375,23 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
     if (!batch_meta) return GST_PAD_PROBE_OK;
 
     int64_t now = now_us();
+    int frame_safety = 0;
 
-    /* Iterate through the frame list safely */
+    /* --- FRAME LOOP --- */
     for (NvDsFrameMetaList *fl = batch_meta->frame_meta_list; fl != NULL; fl = fl->next) {
-        printf("  Processing frame for src %d\n", src);
+        // SAFETY CHECK 1
+        if (frame_safety++ > 100) {
+            fprintf(stderr, "[ERROR] Infinite loop in frame_meta_list detected!\n");
+            break;
+        }
+
         NvDsFrameMeta *fm = (NvDsFrameMeta *)fl->data;
         if (!fm) continue;
 
         int src = (int)fm->source_id;
+        // Now 'src' is defined, so we can print it safely
+        printf("[DEBUG] Processing frame for src %d (Batch count: %d)\n", src, frame_safety);
+
         if (src < 0 || src >= g_num_cameras) continue;
 
         /* --- FPS Calculation --- */
@@ -396,7 +402,7 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         }
         g_last_ts[src] = now;
 
-        /* --- Detection Logic --- */
+        /* --- DETECTION LOOP --- */
         DetectionFrame det = {0};
         det.frame_number = (uint32_t)(fm->frame_num);
         det.timestamp_us = now;
@@ -406,7 +412,14 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
         float fw = fm->source_frame_width  > 0 ? (float)fm->source_frame_width  : (float)FRAME_WIDTH;
         float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : (float)FRAME_HEIGHT;
 
+        int obj_safety = 0;
         for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL; ol = ol->next) {
+            // SAFETY CHECK 2
+            if (obj_safety++ > 1000) {
+                fprintf(stderr, "[ERROR] Infinite loop in obj_meta_list (src %d)!\n", src);
+                break;
+            }
+
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
             if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.75) {
                 Detection *d = &det.detections[det.num_detections++];
@@ -422,30 +435,21 @@ static GstPadProbeReturn inference_src_pad_buffer_probe(
 
         NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
 
-        /* --- FPS Overlay Logic --- */
+        /* --- FPS Overlay --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
         if (dm) {
             dm->num_labels = 1;
             NvOSD_TextParams *tp = &dm->text_params[0];
-            
-            /* DeepStream will g_free this automatically later */
             tp->display_text = (char *)g_malloc0(32); 
             snprintf(tp->display_text, 31, "cam%d  %.1f fps", src, g_fps[src]);
-            
-            tp->x_offset = 10;
-            tp->y_offset = 10;
+            tp->x_offset = 10; tp->y_offset = 10;
             tp->font_params.font_name  = (char *)"Sans";
             tp->font_params.font_size  = 12;
             tp->font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
             tp->set_bg_clr  = 1;
             tp->text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.6};
-            
-            /* Add to the FRAME meta so the Tiler can offset it correctly */
             nvds_add_display_meta_to_frame(fm, dm);
         }
-
-        if (det.num_detections > 0)
-            printf("[DS] cam%d frame %u: %u detections\n", src, det.frame_number, det.num_detections);
     }
 
     return GST_PAD_PROBE_OK;
