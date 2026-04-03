@@ -32,6 +32,10 @@ cluster-mode=2
 
 maintain-aspect-ratio=1
 symmetric-padding=1
+# scaling-compute-hw=1 → GPU/CUDA path for nvinfer's internal pre-process scaling.
+# Avoids the VIC 16x16-minimum bug in DeepStream 7.1 / JetPack 6.x that causes
+# deferred cudaErrorIllegalAddress after ~30s of operation.
+scaling-compute-hw=1
 
 # Custom YOLO parser from DeepStream-Yolo
 parse-bbox-func-name=NvDsInferParseYolo

@@ -630,6 +630,18 @@ int main(int argc, char *argv[])
             }
 
             g_object_set(source[i], "device", camera_device[i], NULL);
+            /* copy-hw=2: GPU/CUDA path — see shared element comment above */
+            g_object_set(vidconv[i], "copy-hw", 2, NULL);
+            /* Leaky downstream queue: drop oldest compressed frame when nvinfer
+             * is busy.  Camera runs at 120fps; inference at ~30fps.  Without
+             * this the queue fills, NVMM DMA fds accumulate, and CUDA mappings
+             * eventually become invalid.                                       */
+            g_object_set(src_queue[i],
+                         "leaky",            2,   /* GST_QUEUE_LEAK_DOWNSTREAM */
+                         "max-size-buffers", 4,
+                         "max-size-bytes",   0,
+                         "max-size-time",    0,
+                         NULL);
             printf("[DS]   camera %d → %s\n", i, camera_device[i]);
 
             /* Lock v4l2src to the camera's native MJPEG mode (1280×800 @ 120 fps). */
@@ -649,9 +661,22 @@ int main(int argc, char *argv[])
                  "height",               PIPE_HEIGHT,
                  "batched-push-timeout", 100000,
                  "live-source",          use_file ? FALSE : TRUE,
+                 /* compute-hw=1 → GPU/CUDA path for all VIC transforms inside
+                  * nvstreammux.  Avoids the VIC 16×16-min bug in DS 7.1 / JP 6.x
+                  * that causes deferred cudaErrorIllegalAddress after ~30 s.    */
+                 "compute-hw",           1,
                  NULL);
     g_object_set(infer,   "config-file-path", INFER_CONFIG, NULL);
     g_object_set(nvdsosd, "process-mode",     0,            NULL);
+
+    /* copy-hw=2 → CUDA path for ALL nvvideoconvert elements.
+     * On Jetson Orin + DeepStream 7.1 the default VIC path in nvvideoconvert
+     * corrupts DMA buffer CUDA mappings after tens of seconds of operation,
+     * causing cudaErrorIllegalAddress 700 inside nvinfer preprocessing.
+     * copy-hw=2 (GPU) is the NVIDIA-confirmed workaround (DS forums #332306,
+     * #335930, #364425).  Apply to every nvvideoconvert in the pipeline.    */
+    g_object_set(vidconv_osd, "copy-hw", 2, NULL);
+    g_object_set(nv2cpu,      "copy-hw", 2, NULL);
     g_object_set(tiler,
                  "rows",    tiler_rows,
                  "columns", tiler_cols,
