@@ -31,6 +31,7 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <math.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -57,14 +58,14 @@
 /* Camera capture resolution — must match a MJPEG mode the camera reports.
  * Used only in the v4l2src capsfilter.                                     */
 #define CAPTURE_WIDTH  1280
-#define CAPTURE_HEIGHT 800
+#define CAPTURE_HEIGHT 720
 
 /* Internal pipeline resolution fed to nvstreammux (per-stream).
- * 640×400 maintains the camera's native 16:10 (1280×800) aspect ratio.
- * nvinfer's maintain-aspect-ratio=1 + symmetric-padding=1 pads the 640×400
- * input to 640×640 for the model with black bars (120 px top+bottom).       */
+ * 640×360 is half of the camera's native 1280×720 (16:9).
+ * nvinfer's maintain-aspect-ratio=1 + symmetric-padding=1 pads to 640×640
+ * with black bars (140 px top+bottom).                                       */
 #define PIPE_WIDTH  640
-#define PIPE_HEIGHT 400
+#define PIPE_HEIGHT 360
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                              */
@@ -73,11 +74,22 @@
 static GMainLoop    *g_loop         = NULL;
 static NT_Inst       g_nt_inst      = 0;
 static NT_Publisher  g_nt_pub[MAX_CAMERAS];
+static NT_Publisher  g_nt_heartbeat_pub = 0;
+static int64_t       g_heartbeat    = 0;
 static int           g_num_cameras  = 1;
 
 /* Per-source FPS tracking */
 static float    g_fps[MAX_CAMERAS]     = {0};
 static int64_t  g_last_ts[MAX_CAMERAS] = {0};
+
+/* Per-camera geometry for ground-plane projection.
+ * fx/fy/cx/cy are pre-scaled to the pipeline resolution (PIPE_WIDTH×PIPE_HEIGHT). */
+static double g_cam_height[MAX_CAMERAS]; /* meters above floor                  */
+static double g_cam_pitch [MAX_CAMERAS]; /* radians below horizontal (positive) */
+static double g_cam_fx    [MAX_CAMERAS]; /* focal length x, pipeline pixels     */
+static double g_cam_fy    [MAX_CAMERAS]; /* focal length y, pipeline pixels     */
+static double g_cam_cx    [MAX_CAMERAS]; /* principal point x, pipeline pixels  */
+static double g_cam_cy    [MAX_CAMERAS]; /* principal point y, pipeline pixels  */
 
 /* Camera device paths (populated in main, read by HTTP /set handler) */
 static char g_cam_paths[MAX_CAMERAS][32];
@@ -344,7 +356,6 @@ static void nt_init(int num_cameras)
     unsigned int team    = team_str ? (unsigned int)atoi(team_str) : 0;
 
     struct WPI_String identity = { "jetson-vision", 13 };
-    struct WPI_String type_str = { "raw",            3 };
     struct WPI_String fallback = { "roborio-0-frc.local", 19 };
 
     g_nt_inst = NT_GetDefaultInstance();
@@ -362,13 +373,38 @@ static void nt_init(int num_cameras)
     memset(&opts, 0, sizeof(opts));
     opts.structSize = sizeof(opts);
 
+    /* --- Announce BallDetection struct schema (required for WPILib StructArrayTopic) --- */
+    {
+        const char *schema_path = "/.schema/struct:BallDetection";
+        const char *schema_val  = "double x;double y;double distance";
+        struct WPI_String sname = { schema_path, strlen(schema_path) };
+        struct WPI_String stype = { "structschema", 12 };
+        struct WPI_String sval  = { schema_val,  strlen(schema_val)  };
+        NT_Topic stopic = NT_GetTopic(g_nt_inst, &sname);
+        NT_Publisher spub = NT_Publish(stopic, NT_STRING, &stype, &opts);
+        NT_SetString(spub, 0, &sval);
+        printf("[NT] Schema announced: %s\n", schema_path);
+    }
+
+    /* --- Per-camera BallDetection array publishers --- */
+    struct WPI_String ball_type = { "struct:BallDetection[]", 22 };
     for (int i = 0; i < num_cameras; i++) {
         char path[64];
-        snprintf(path, sizeof(path), "/vision/detections/%d", i);
+        snprintf(path, sizeof(path), "objectdetection/balls/%d", i);
         struct WPI_String topic_name = { path, strlen(path) };
         NT_Topic topic = NT_GetTopic(g_nt_inst, &topic_name);
-        g_nt_pub[i] = NT_Publish(topic, NT_RAW, &type_str, &opts);
+        g_nt_pub[i] = NT_Publish(topic, NT_RAW, &ball_type, &opts);
         printf("[NT] Publisher created for %s\n", path);
+    }
+
+    /* --- Heartbeat (increments every batch like PhotonVision) --- */
+    {
+        const char *hb_path = "objectdetection/heartbeat";
+        struct WPI_String hbname = { hb_path, strlen(hb_path) };
+        struct WPI_String hbtype = { "int", 3 };
+        NT_Topic hbtopic = NT_GetTopic(g_nt_inst, &hbname);
+        g_nt_heartbeat_pub = NT_Publish(hbtopic, NT_INTEGER, &hbtype, &opts);
+        printf("[NT] Publisher created for %s\n", hb_path);
     }
 }
 
@@ -428,68 +464,87 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
         g_last_ts[src] = now;
 
         /* --- DETECTION DATA (NetworkTables) --- */
-        DetectionFrame det = {0};
-        det.frame_number = (uint32_t)fm->frame_num;
-        det.timestamp_us = (uint64_t)now;
-        det.fps          = g_fps[src];
-        det.source_id    = (uint32_t)src;
+        /* Buffer for packed BallDetection array: 3× double (24 bytes) per detection */
+        uint8_t ball_buf[MAX_DETECTIONS * 24];
+        int ball_count = 0;
 
-        float fw = fm->source_frame_width  > 0 ? (float)fm->source_frame_width  : 1280.0f;
-        float fh = fm->source_frame_height > 0 ? (float)fm->source_frame_height : 800.0f;
+        (void)(fm->source_frame_width);   /* unused — bbox coords are in pipe space */
+        (void)(fm->source_frame_height);
 
         // Object Loop with Safety Limit
         int obj_count = 0;
         for (NvDsObjectMetaList *ol = fm->obj_meta_list; ol != NULL && obj_count < 150; ol = ol->next) {
             obj_count++;
             NvDsObjectMeta *om = (NvDsObjectMeta *)ol->data;
-            
-            // Only process and display if confidence is above 0.95
-            if (om && det.num_detections < MAX_DETECTIONS && om->confidence > 0.7) {
-                
-                /* 1. Update NetworkTables Logic */
-                Detection *d = &det.detections[det.num_detections++];
-                d->class_id   = om->class_id;
-                d->confidence = om->confidence;
-                d->left       = om->rect_params.left   / fw;
-                d->top        = om->rect_params.top    / fh;
-                d->width      = om->rect_params.width  / fw;
-                d->height     = om->rect_params.height / fh;
-                g_strlcpy(d->label, om->obj_label, sizeof(d->label));
 
-                /* 2. Update the On-Screen Label with Confidence */
+            if (om && om->confidence > 0.7) {
+
+                if (ball_count < MAX_DETECTIONS) {
+                    /* --- Ground-plane projection (z = 0 assumption) ---
+                     *
+                     * bbox coords are in pipeline space (PIPE_WIDTH × PIPE_HEIGHT).
+                     * Intrinsics are pre-scaled to the same space.
+                     *
+                     * Pinhole back-projection:
+                     *   alpha_x = atan2(px - cx, fx)   lateral angle  (right = +)
+                     *   alpha_y = atan2(py - cy, fy)   vertical angle (down  = +)
+                     *
+                     * Total angle below horizontal:
+                     *   theta_v = cam_pitch + alpha_y
+                     *
+                     * Ground-plane intersection (metres):
+                     *   y = h / tan(theta_v)              (forward)
+                     *   x = y × tan(alpha_x)              (lateral, right = +)
+                     *   distance = sqrt(x² + y² + h²)    (3-D Euclidean)
+                     */
+                    double px = om->rect_params.left + om->rect_params.width  * 0.5;
+                    double py = om->rect_params.top  + om->rect_params.height * 0.5;
+
+                    double alpha_x = atan2(px - g_cam_cx[src], g_cam_fx[src]);
+                    double alpha_y = atan2(py - g_cam_cy[src], g_cam_fy[src]);
+                    double theta_v = g_cam_pitch[src] + alpha_y;
+
+                    if (theta_v > 0.01) { /* ray must intersect floor */
+                        double y_dist  = g_cam_height[src] / tan(theta_v);
+                        double x_dist  = y_dist * tan(alpha_x);
+                        double distance = sqrt(x_dist * x_dist + y_dist * y_dist
+                                               + g_cam_height[src] * g_cam_height[src]);
+
+                        uint8_t *entry = &ball_buf[ball_count * 24];
+                        memcpy(entry +  0, &x_dist,   8);
+                        memcpy(entry +  8, &y_dist,   8);
+                        memcpy(entry + 16, &distance, 8);
+                        ball_count++;
+                    }
+                }
+
+                /* On-Screen Label with Confidence */
                 char new_label[64];
-                snprintf(new_label, sizeof(new_label), "%s %.0f%%", 
+                snprintf(new_label, sizeof(new_label), "%s %.0f%%",
                          om->obj_label, om->confidence * 100.0);
 
-                // Re-allocate the display text
-                if (om->text_params.display_text) {
+                if (om->text_params.display_text)
                     g_free(om->text_params.display_text);
-                }
                 om->text_params.display_text = g_strdup(new_label);
 
-                // Set styles (standard fields that definitely exist)
                 om->text_params.font_params.font_size = 12;
                 om->text_params.font_params.font_color = (NvOSD_ColorParams){1.0, 1.0, 1.0, 1.0};
                 om->text_params.set_bg_clr = 1;
                 om->text_params.text_bg_clr = (NvOSD_ColorParams){0.0, 0.0, 0.0, 0.5};
-
-                // Ensure the border is visible
                 om->rect_params.border_width = 3;
-                
+
             } else if (om) {
-                /* 3. HIDE low confidence objects */
-                // To hide the text in the SDK, we free it and set to NULL
+                /* Hide low-confidence objects */
                 if (om->text_params.display_text) {
                     g_free(om->text_params.display_text);
                     om->text_params.display_text = NULL;
                 }
-                // To hide the box, set border width to 0
                 om->rect_params.border_width = 0;
             }
         }
 
-        // Send to RoboRIO (Commented out for initial spin test)
-        NT_SetRaw(g_nt_pub[src], 0, (const uint8_t *)&det, sizeof(det));
+        /* Publish packed BallDetection array */
+        NT_SetRaw(g_nt_pub[src], 0, ball_buf, (size_t)(ball_count * 24));
 
         /* --- OSD OVERLAY --- */
         NvDsDisplayMeta *dm = nvds_acquire_display_meta_from_pool(batch_meta);
@@ -512,6 +567,9 @@ inference_src_pad_buffer_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user
         if (next_node == fl) break; // Final check for circular self-reference
         fl = next_node;
     }
+
+    /* Heartbeat: increment once per batch so the robot can detect a dead pipeline */
+    NT_SetInteger(g_nt_heartbeat_pub, 0, ++g_heartbeat);
 
     // 3. RELEASE LOCK: Allow the next buffer to be processed
     __sync_lock_release(&in_probe);
@@ -624,6 +682,48 @@ int main(int argc, char *argv[])
     /* Copy device paths to global so HTTP /set handler can reach them */
     for (int i = 0; i < g_num_cameras; i++)
         strncpy(g_cam_paths[i], camera_device[i], sizeof(g_cam_paths[0]) - 1);
+
+    /* ---- Camera intrinsics from L.json (cam 0) and R.json (cam 1) ----
+     *
+     * Calibrated at 1280×720; scaled by (PIPE_WIDTH/1280) to match the
+     * pipeline resolution that DeepStream reports bbox coords in.
+     *
+     * L.json: fx=908.745 fy=909.706 cx=709.656 cy=298.657
+     * R.json: fx=904.816 fy=905.582 cx=701.235 cy=297.557
+     */
+    static const double calib_fx[MAX_CAMERAS] = { 908.7451150390035, 904.816454639685,  904.816454639685, 904.816454639685 };
+    static const double calib_fy[MAX_CAMERAS] = { 909.7062648318098, 905.5818997009059, 905.5818997009059, 905.5818997009059 };
+    static const double calib_cx[MAX_CAMERAS] = { 709.6564132516656, 701.2349647881925, 701.2349647881925, 701.2349647881925 };
+    static const double calib_cy[MAX_CAMERAS] = { 298.65695020471503, 297.5568933191134, 297.5568933191134, 297.5568933191134 };
+    /* Calibration was at 1280×720; pipeline runs at PIPE_WIDTH×PIPE_HEIGHT */
+    const double pipe_scale = (double)PIPE_WIDTH / 1280.0;
+
+    /* ---- Camera geometry (ground-plane projection) ----
+     * Set mounting parameters via CAM0_HEIGHT / CAM0_PITCH_DEG env vars.
+     */
+    for (int i = 0; i < g_num_cameras; i++) {
+        char env_key[32];
+        const char *ev;
+
+        snprintf(env_key, sizeof(env_key), "CAM%d_HEIGHT", i);
+        ev = getenv(env_key);
+        g_cam_height[i] = ev ? atof(ev) : 0.5;   /* default: 0.5 m above floor        */
+
+        snprintf(env_key, sizeof(env_key), "CAM%d_PITCH_DEG", i);
+        ev = getenv(env_key);
+        double pitch_deg = ev ? atof(ev) : 20.0;  /* default: 20° below horizontal     */
+        g_cam_pitch[i] = pitch_deg * M_PI / 180.0;
+
+        /* Scale calibrated intrinsics to pipeline resolution */
+        g_cam_fx[i] = calib_fx[i] * pipe_scale;
+        g_cam_fy[i] = calib_fy[i] * pipe_scale;
+        g_cam_cx[i] = calib_cx[i] * pipe_scale;
+        g_cam_cy[i] = calib_cy[i] * pipe_scale;
+
+        printf("[Cam %d] height=%.2f m  pitch=%.1f°  fx=%.1f fy=%.1f cx=%.1f cy=%.1f (pipe px)\n",
+               i, g_cam_height[i], pitch_deg,
+               g_cam_fx[i], g_cam_fy[i], g_cam_cx[i], g_cam_cy[i]);
+    }
 
     nt_init(g_num_cameras);
     build_html(g_num_cameras);

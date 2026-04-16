@@ -68,6 +68,7 @@ target_link_libraries(ds_nt_probe PRIVATE
     ${wpiutil_SO}
     ${wpinet_SO}
     pthread
+    m
 )
 
 # Copy WPILib .so files next to the binary so the RPATH finds them
